@@ -1,0 +1,15 @@
+[package]
+name = "encodecraft-job"
+description = "Shared EncodeCraft job / enqueue types (safe for EffectCraft to depend on)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

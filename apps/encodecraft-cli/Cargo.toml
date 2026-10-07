@@ -1,0 +1,19 @@
+[package]
+name = "encodecraft-cli"
+description = "EncodeCraft command-line tool: encode, enqueue, probe, serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+encodecraft-job = { workspace = true }
+encodecraft-presets = { workspace = true }
+encodecraft-ffmpeg = { workspace = true }
+encodecraft-queue = { workspace = true }
+encodecraft-engine = { workspace = true }
+serde_json = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

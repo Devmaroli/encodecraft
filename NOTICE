@@ -1,0 +1,14 @@
+EncodeCraft
+Copyright 2026 EncodeCraft contributors
+
+This product is licensed under the MIT License or the Apache License, Version 2.0,
+at your option. See LICENSE-MIT and LICENSE-APACHE.
+
+EncodeCraft is an independent open-source project. It is not affiliated with,
+sponsored by, or endorsed by Adobe Inc. Adobe, After Effects, and Adobe Media Encoder
+are trademarks of Adobe Inc.
+
+EncodeCraft follows the Cargo workspace layout, egui/eframe UI approach, and
+engineering conventions of EffectCraft (https://github.com/storytold/effectcraft)
+so the two apps can sit side by side and later share crates. EncodeCraft is not an
+official ArtCraft / Crafting Apps product.

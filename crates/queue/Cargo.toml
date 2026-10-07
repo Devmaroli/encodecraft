@@ -1,0 +1,18 @@
+[package]
+name = "encodecraft-queue"
+description = "EncodeCraft queue model: jobs, statuses, reorder, expand-to-sizes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+encodecraft-job = { workspace = true }
+encodecraft-presets = { workspace = true }
+encodecraft-ffmpeg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

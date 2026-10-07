@@ -1,0 +1,18 @@
+[package]
+name = "encodecraft"
+description = "EncodeCraft desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "encodecraft"
+
+[lints]
+workspace = true
+
+[dependencies]
+encodecraft-job = { workspace = true }
+encodecraft-engine = { workspace = true }
+encodecraft-ui-egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }
+env_logger = { workspace = true }
+log = { workspace = true }

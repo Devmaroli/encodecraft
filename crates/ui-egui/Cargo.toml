@@ -1,0 +1,24 @@
+[package]
+name = "encodecraft-ui-egui"
+description = "EncodeCraft egui frontend: queue, preset browser, encoding panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+encodecraft-job = { workspace = true }
+encodecraft-presets = { workspace = true }
+encodecraft-ffmpeg = { workspace = true }
+encodecraft-queue = { workspace = true }
+encodecraft-engine = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+rfd = { workspace = true }
+image = { workspace = true }

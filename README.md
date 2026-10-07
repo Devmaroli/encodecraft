@@ -39,7 +39,7 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 
 A ready-to-run 64-bit zip (`encodecraft-*-windows-x64.zip`) ships `encodecraft.exe`, `encodecraft-cli.exe`, and a bundled `ffmpeg.exe` / `ffprobe.exe`. Unzip the folder and double-click `encodecraft.exe`. See `README-Windows.txt` inside the zip (SmartScreen: More info → Run anyway).
 
-To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`.
+To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
 
 ### FFmpeg on Windows (if you are compiling yourself)
 

@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => log::warn!("control server not started: {e} (another EncodeCraft may already be listening)"),
     }
     encodecraft_ui_egui::run(handle.clone())?;
-    handle.stop_all();
+    handle.shutdown();
     encodecraft_engine::clear_lock();
     Ok(())
 }

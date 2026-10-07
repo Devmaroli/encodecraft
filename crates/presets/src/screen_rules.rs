@@ -14,6 +14,8 @@ pub enum PresetReason {
     UltraWide,
     ListedScreen,
     OtherScreen,
+    /// EffectCraft / `preset_id: auto` with no named screen — Installation.
+    StudioDefault,
     #[default]
     Manual,
 }
@@ -24,6 +26,7 @@ impl PresetReason {
             PresetReason::UltraWide => "ultra wide",
             PresetReason::ListedScreen => "listed screen",
             PresetReason::OtherScreen => "other screen",
+            PresetReason::StudioDefault => "installation default",
             PresetReason::Manual => "override",
         }
     }
@@ -168,20 +171,29 @@ impl ScreenPresetRules {
             || lower == inst
     }
 
+    /// `auto` / empty / `system.auto` — EffectCraft can send this instead of Match Source.
+    pub fn is_auto_token(preset_id: &str) -> bool {
+        matches!(preset_id.trim().to_ascii_lowercase().as_str(), "" | "auto" | "system.auto")
+    }
+
     /// Pick Better Res or Installation when this item has a screen identity.
     ///
-    /// `screen` is `sizes[].name` / Screen Suite. `source_name` is the `{screen}` token, composition
-    /// name, or file name used when `screen` is missing.
-    pub fn pick(&self, screen: Option<&ScreenSize>, source_name: &str) -> Option<PresetPick> {
+    /// `screen` is `sizes[].name` / Screen Suite. `source_name` is the composition or file name.
+    /// `pixels` is the comp / source raster when EffectCraft did not send `sizes[]`.
+    pub fn pick(&self, screen: Option<&ScreenSize>, source_name: &str, pixels: Option<(u32, u32)>) -> Option<PresetPick> {
         if !self.enabled {
             return None;
         }
         if let Some(sz) = screen {
-            return Some(self.classify(&sz.name, Some(sz.width), Some(sz.height)));
+            let w = if sz.width > 0 { Some(sz.width) } else { pixels.map(|p| p.0) };
+            let h = if sz.height > 0 { Some(sz.height) } else { pixels.map(|p| p.1) };
+            return Some(self.classify(&sz.name, w, h));
         }
         let (parsed_w, parsed_h) = parse_dims_from_text(source_name);
-        if self.has_name_identity(source_name) || self.dims_are_identity(parsed_w, parsed_h) {
-            return Some(self.classify(source_name, parsed_w, parsed_h));
+        let w = pixels.map(|p| p.0).filter(|n| *n > 0).or(parsed_w);
+        let h = pixels.map(|p| p.1).filter(|n| *n > 0).or(parsed_h);
+        if self.has_name_identity(source_name) || self.dims_are_identity(w, h) {
+            return Some(self.classify(source_name, w, h));
         }
         None
     }
@@ -401,7 +413,7 @@ mod tests {
 
     fn pick_name(name: &str, w: u32, h: u32) -> PresetPick {
         let sz = ScreenSize::new(name, w, h);
-        rules().pick(Some(&sz), "").expect("sized jobs always pick")
+        rules().pick(Some(&sz), "", None).expect("sized jobs always pick")
     }
 
     #[test]
@@ -412,7 +424,7 @@ mod tests {
         assert_eq!(p.reason.label(), "ultra wide");
         let p = pick_name("the-avenues-gate", 100, 100);
         assert_eq!(p.reason, PresetReason::UltraWide);
-        let from_file = rules().pick(None, "Hero_The Avenues Gate_v2.mp4").expect("name in file");
+        let from_file = rules().pick(None, "Hero_The Avenues Gate_v2.mp4", None).expect("name in file");
         assert_eq!(from_file.reason, PresetReason::UltraWide);
         assert_eq!(from_file.preset_id, BETTER_RES_ID);
     }
@@ -450,9 +462,9 @@ mod tests {
         assert_eq!(a.reason, PresetReason::ListedScreen);
         let b = pick_name("Al Nassar Tower Vertical", 960, 5328);
         assert_eq!(b.preset_id, BETTER_RES_ID);
-        let from_dims = rules().pick(None, "spot_1008x5184.mov").expect("unique dims");
+        let from_dims = rules().pick(None, "spot_1008x5184.mov", None).expect("unique dims");
         assert_eq!(from_dims.preset_id, BETTER_RES_ID);
-        let nassar = rules().pick(None, "out_960x5328.png").expect("nassar dims");
+        let nassar = rules().pick(None, "out_960x5328.png", None).expect("nassar dims");
         assert_eq!(nassar.preset_id, BETTER_RES_ID);
     }
 
@@ -487,8 +499,10 @@ mod tests {
 
     #[test]
     fn filename_without_screen_does_not_auto() {
-        assert!(rules().pick(None, "hero.mp4").is_none());
-        assert!(rules().pick(None, "clip_1920x1080.mp4").is_none());
+        assert!(rules().pick(None, "hero.mp4", None).is_none());
+        assert!(rules().pick(None, "clip_1920x1080.mp4", None).is_none());
+        assert_eq!(rules().pick(None, "Honor 400_EN.ai Comp", Some((1008, 5184))).unwrap().preset_id, BETTER_RES_ID);
+        assert!(rules().pick(None, "Honor 400_EN.ai Comp", Some((1080, 1080))).is_none());
     }
 
     #[test]
@@ -506,7 +520,7 @@ mod tests {
     fn disabled_rules_do_not_pick() {
         let mut r = ScreenPresetRules::default();
         r.enabled = false;
-        assert!(r.pick(Some(&ScreenSize::new("The Avenues Gate", 100, 100)), "").is_none());
+        assert!(r.pick(Some(&ScreenSize::new("The Avenues Gate", 100, 100)), "", None).is_none());
     }
 
     #[test]
@@ -514,7 +528,11 @@ mod tests {
         let r = ScreenPresetRules::default();
         assert!(r.is_auto_eligible("system.h264-mp4"));
         assert!(r.is_auto_eligible("h264"));
+        assert!(r.is_auto_eligible("auto"));
         assert!(r.is_auto_eligible("system.better-res"));
+        assert!(ScreenPresetRules::is_auto_token("auto"));
+        assert!(ScreenPresetRules::is_auto_token("system.auto"));
+        assert!(!ScreenPresetRules::is_auto_token("system.h264-mp4"));
         assert!(!r.is_auto_eligible("system.hevc-mp4"));
         assert!(!r.is_auto_eligible("user.custom"));
     }

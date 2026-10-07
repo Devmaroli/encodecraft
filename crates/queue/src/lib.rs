@@ -11,7 +11,7 @@ use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize
 use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_presets::{
     apply_template, constrain_output_dir, default_template, infer_screen_from_text, output_path, unique_output_path, ExportPreset, NamingContext,
-    PresetLibrary, PresetReason,
+    PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
 };
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +151,32 @@ impl Job {
         self.size_name_pending = false;
         true
     }
+
+    /// Re-run Better Res / Installation once width×height is known (EffectCraft mezzanine / .ecproj).
+    pub fn refresh_auto_preset(&mut self, lib: &PresetLibrary) {
+        if self.preset_overridden || !lib.screen_rules.is_auto_eligible(&self.preset.id) {
+            return;
+        }
+        let hint = source_screen_hint(&self.source);
+        let pixels = match (self.preset.video.width, self.preset.video.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+            _ => self.source.pixel_size(),
+        };
+        let Some(pick) = lib.screen_rules.pick(self.screen.as_ref(), &hint, pixels) else {
+            return;
+        };
+        let Ok(mut pr) = lib.get_or_parse(&pick.preset_id) else {
+            return;
+        };
+        let w = self.preset.video.width;
+        let h = self.preset.video.height;
+        pr.video.width = w;
+        pr.video.height = h;
+        pr.video.scale = self.scale;
+        self.preset = pr;
+        self.preset_reason = Some(pick.reason);
+        self.encode_warning = h264_unencodable_message(&self.preset, w.unwrap_or(0), h.unwrap_or(0));
+    }
 }
 
 static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -273,7 +299,8 @@ impl EncodeQueue {
         clamp_output: bool,
     ) -> Result<Vec<Job>, QueueError> {
         req.validate()?;
-        let mut preset = lib.get_or_parse(&req.preset_id).map_err(|e| QueueError::Message(e.to_string()))?;
+        let lookup = if ScreenPresetRules::is_auto_token(&req.preset_id) { "system.h264-mp4" } else { req.preset_id.as_str() };
+        let mut preset = lib.get_or_parse(lookup).map_err(|e| QueueError::Message(e.to_string()))?;
         if let Some(over) = &req.preset_override {
             preset = preset.merge_override(over).map_err(|e| QueueError::Message(e.to_string()))?;
         }
@@ -299,11 +326,24 @@ impl EncodeQueue {
             let mut pr = preset.clone();
             let mut preset_reason = None;
             let mut preset_overridden = false;
-            if auto {
-                if let Some(pick) = lib.screen_rules.pick(screen.as_ref(), &source_hint) {
+            let sticky = lib.get_sticky(&req.source, screen.as_ref()).and_then(|id| lib.get_or_parse(&id).ok()).filter(|p| !lib.is_one_off(p));
+            if let Some(chosen) = sticky {
+                pr = chosen;
+                preset_reason = Some(PresetReason::Manual);
+                preset_overridden = true;
+            } else if auto {
+                let pixels = req.source.pixel_size().or_else(|| {
+                    screen.as_ref().and_then(|s| if s.width > 0 && s.height > 0 { Some((s.width, s.height)) } else { None })
+                });
+                if let Some(pick) = lib.screen_rules.pick(screen.as_ref(), &source_hint, pixels) {
                     if let Ok(chosen) = lib.get_or_parse(&pick.preset_id) {
                         pr = chosen;
                         preset_reason = Some(pick.reason);
+                    }
+                } else if ScreenPresetRules::is_auto_token(&req.preset_id) || matches!(req.source, JobSource::EffectCraft { .. }) {
+                    if let Ok(chosen) = lib.get_or_parse(INSTALLATION_ID) {
+                        pr = chosen;
+                        preset_reason = Some(PresetReason::StudioDefault);
                     }
                 }
             } else if !req.preset_id.is_empty() {
@@ -368,7 +408,7 @@ impl EncodeQueue {
                 encode_warning,
                 naming: naming.to_string(),
                 size_name_pending: w == 0 || h == 0,
-                status: JobStatus::Waiting,
+                status: if req.start_queue { JobStatus::Waiting } else { JobStatus::Paused },
                 progress: ProgressSnap::default(),
                 log: String::new(),
                 error: None,
@@ -393,9 +433,19 @@ impl EncodeQueue {
         let ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
         self.jobs.extend(jobs);
         if req.start_queue {
-            self.running = true;
+            self.start();
         }
         Ok(ids)
+    }
+
+    /// Start the queue and release jobs that were held with `start_queue: false`.
+    pub fn start(&mut self) {
+        self.running = true;
+        for j in &mut self.jobs {
+            if j.status == JobStatus::Paused {
+                j.status = JobStatus::Waiting;
+            }
+        }
     }
 
     pub fn persist_view(&self) -> Self {
@@ -443,6 +493,7 @@ pub fn preview_name(source: &JobSource, preset: &ExportPreset, w: u32, h: u32, t
 mod tests {
     use super::*;
     use encodecraft_job::{EnqueueRequest, JobSource};
+    use encodecraft_presets::{APPROVAL_RES_ID, BETTER_RES_ID, SULTAN_ID};
     use std::path::PathBuf;
 
     fn req_many() -> EnqueueRequest {
@@ -574,8 +625,11 @@ mod tests {
         assert!(name.contains("1080x1080"), "{name}");
         assert!(!name.contains("srcxsrc"), "{name}");
         assert!(!jobs[0].size_name_pending);
+        assert_eq!(jobs[0].preset.id, "system.installation");
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::StudioDefault));
         assert_eq!(jobs[0].preset.video.width, Some(1080));
         assert_eq!(jobs[0].preset.video.height, Some(1080));
+        assert_eq!(jobs[0].status, JobStatus::Paused);
     }
 
     #[test]
@@ -609,5 +663,159 @@ mod tests {
         assert!(after.contains("1080x1080"), "{after}");
         assert!(!after.contains("srcxsrc"), "{after}");
         assert!(!jobs[0].size_name_pending);
+    }
+
+    #[test]
+    fn effectcraft_h264_default_gets_installation() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/spot.ecproj"),
+                comp: Some("Honor 400_EN.ai Comp".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(1080),
+                height: Some(1080),
+            },
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}_{width}x{height}", false, true).unwrap();
+        assert_eq!(jobs[0].preset.id, "system.installation");
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::StudioDefault));
+        assert_eq!(jobs[0].preset.video.width, Some(1080));
+        assert!(!jobs[0].preset_overridden);
+    }
+
+    #[test]
+    fn effectcraft_auto_token_and_listed_size_get_better_res() {
+        let lib = PresetLibrary::new();
+        let mut req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/spot.ecproj"),
+                comp: Some("Main".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(1008),
+                height: Some(5184),
+            },
+            preset_id: "auto".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: true,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(jobs[0].preset.id, "system.better-res");
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::ListedScreen));
+        assert_eq!(jobs[0].status, JobStatus::Waiting);
+        req.preset_id = "auto".into();
+        req.source = JobSource::EffectCraft {
+            project: PathBuf::from("/p/spot.ecproj"),
+            comp: Some("The Avenues Gate".into()),
+            mezzanine: "prores".into(),
+            work_area: false,
+            width: Some(1920),
+            height: Some(1080),
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::UltraWide));
+        assert_eq!(jobs[0].preset.id, "system.better-res");
+    }
+
+    #[test]
+    fn file_match_source_without_screen_stays_h264() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::file("/clips/hero.mp4"),
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(jobs[0].preset.id, "system.h264-mp4");
+        assert!(jobs[0].preset_reason.is_none());
+    }
+
+    #[test]
+    fn start_queue_false_holds_job_while_running() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        q.running = true;
+        let mut req = req_many();
+        req.start_queue = false;
+        req.sizes = vec![];
+        q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert!(q.running);
+        assert_eq!(q.jobs[0].status, JobStatus::Paused);
+        assert!(q.next_waiting().is_none());
+        q.start();
+        assert_eq!(q.jobs[0].status, JobStatus::Waiting);
+        assert!(q.next_waiting().is_some());
+    }
+
+    fn honor_req() -> EnqueueRequest {
+        EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("C:/work/spot.ecproj"),
+                comp: Some("Main".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(1080),
+                height: Some(1080),
+            },
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: vec![ScreenSize::new("Honor 400", 1080, 1080)],
+            trim: None,
+            scale: None,
+            start_queue: false,
+        }
+    }
+
+    #[test]
+    fn sticky_better_res_survives_resend_approval_res_does_not() {
+        let mut lib = PresetLibrary::new();
+        let req = honor_req();
+        let first = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(first[0].preset.id, INSTALLATION_ID);
+
+        let better = lib.get(BETTER_RES_ID).unwrap();
+        lib.remember_manual_choice(&first[0].source, first[0].screen.as_ref(), &better);
+        let resent = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(resent[0].preset.id, BETTER_RES_ID);
+        assert_eq!(resent[0].preset_reason, Some(PresetReason::Manual));
+
+        let approval = lib.get(APPROVAL_RES_ID).unwrap();
+        lib.remember_manual_choice(&resent[0].source, resent[0].screen.as_ref(), &approval);
+        let after_one_off = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(after_one_off[0].preset.id, INSTALLATION_ID);
+        assert_ne!(after_one_off[0].preset_reason, Some(PresetReason::Manual));
+
+        let sultan = lib.get(SULTAN_ID).unwrap();
+        lib.remember_manual_choice(&first[0].source, first[0].screen.as_ref(), &better);
+        lib.remember_manual_choice(&first[0].source, first[0].screen.as_ref(), &sultan);
+        let after_sultan = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(after_sultan[0].preset.id, INSTALLATION_ID);
     }
 }

@@ -166,8 +166,10 @@ fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: 
 
     let src_w = input.media.map(|m| m.width()).filter(|w| *w > 0);
     let src_h = input.media.map(|m| m.height()).filter(|h| *h > 0);
-    let dst_w = p.video.width.or(src_w).unwrap_or(1920);
-    let dst_h = p.video.height.or(src_h).unwrap_or(1080);
+    // Match source / studio presets keep the source raster. Never invent a 1920×1080 letterbox
+    // unless the preset or a screen size actually set width/height.
+    let dst_w = p.video.width.filter(|n| *n > 0).or(src_w);
+    let dst_h = p.video.height.filter(|n| *n > 0).or(src_h);
 
     if p.format.has_video() {
         let mut vf = Vec::new();
@@ -177,16 +179,22 @@ fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: 
             }
         }
         if p.format != OutputFormat::Gif {
-            if let Some(filter) = scale_filter(p.video.scale, dst_w, dst_h, p.format) {
-                vf.push(filter);
+            if let (Some(w), Some(h)) = (dst_w, dst_h) {
+                let same_as_source = src_w.is_some_and(|sw| even(sw) == even(w)) && src_h.is_some_and(|sh| even(sh) == even(h));
+                let skip_scale = same_as_source && !matches!(p.video.scale, ScaleMode::Stretch);
+                if !skip_scale {
+                    if let Some(filter) = scale_filter(p.video.scale, w, h, p.format) {
+                        vf.push(filter);
+                    }
+                }
             }
         }
         match p.format {
-            OutputFormat::H264Mp4 => h264(&mut args, p, &vf, dst_w, dst_h, pass, passlogfile),
+            OutputFormat::H264Mp4 => h264(&mut args, p, &vf, dst_w.unwrap_or(0), dst_h.unwrap_or(0), pass, passlogfile),
             OutputFormat::HevcMp4 => hevc(&mut args, p, &vf),
             OutputFormat::ProResMov => prores(&mut args, p, &vf),
             OutputFormat::WebmVp9 => vp9(&mut args, p, &vf),
-            OutputFormat::Gif => gif(&mut args, p, dst_w, dst_h),
+            OutputFormat::Gif => gif(&mut args, p, dst_w.unwrap_or(480), dst_h.unwrap_or(270)),
             OutputFormat::PngSequence => sequence(&mut args, p, &vf, false),
             OutputFormat::JpegSequence => sequence(&mut args, p, &vf, true),
             OutputFormat::Aac | OutputFormat::Wav | OutputFormat::Mp3 => {}
@@ -418,6 +426,7 @@ pub fn sequence_pattern(first_frame: &Path) -> Option<(PathBuf, u32, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::VideoStream;
     use encodecraft_presets::{PresetLibrary, VideoSettings};
 
     fn plan_for(id: &str, w: Option<u32>, h: Option<u32>, scale: ScaleMode) -> EncodePlan {
@@ -629,6 +638,64 @@ mod tests {
         .join(" ");
         assert!(s.contains("-b:v 5000k"));
         assert!(s.contains("-maxrate 6000k"));
+    }
+
+    #[test]
+    fn studio_preset_without_size_does_not_letterbox_to_1920x1080() {
+        let lib = PresetLibrary::new();
+        let p = lib.get("system.better-res").unwrap();
+        let s = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        })
+        .args
+        .join(" ");
+        assert!(!s.contains("pad=1920:1080"), "{s}");
+        assert!(!s.contains("scale=1920:1080"), "{s}");
+
+        let media = MediaInfo {
+            path: PathBuf::from("in.mp4"),
+            duration_sec: Some(10.0),
+            format_name: "mp4".into(),
+            video: Some(VideoStream { width: 1080, height: 1080, fps: Some(25.0), codec: "prores".into(), pix_fmt: "yuv422p10le".into() }),
+            audio: None,
+        };
+        let s = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: Some(&media),
+            sequence_start: None,
+        })
+        .args
+        .join(" ");
+        assert!(!s.contains("pad=1920:1080"), "{s}");
+        assert!(!s.contains("pad=1080:1080"), "{s}");
+    }
+
+    #[test]
+    fn sultan_is_2_3_mbps_without_audio() {
+        let lib = PresetLibrary::new();
+        let p = lib.get("system.sultan").unwrap();
+        let s = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        })
+        .args
+        .join(" ");
+        assert!(s.contains("-b:v 2000k"), "{s}");
+        assert!(s.contains("-maxrate 3000k"), "{s}");
+        assert!(s.contains("-an"), "{s}");
+        assert!(!s.contains("pad=1920:1080"), "{s}");
     }
 
     #[test]

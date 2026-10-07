@@ -52,7 +52,7 @@ pub fn run(h: Handle) {
             }
         }
     });
-    loop {
+    while h.is_alive() {
         thread::sleep(Duration::from_secs(2));
         let (folders, output_dir, work_dir) = h.lock(|s| (s.settings.watch_folders.clone(), s.settings.output_dir.clone(), crate::paths::work_dir()));
         for w in folders {

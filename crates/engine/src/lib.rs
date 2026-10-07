@@ -22,7 +22,9 @@ pub use persist::Settings;
 pub use watch::WatchFolder;
 
 use std::collections::HashMap;
+use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -52,11 +54,18 @@ pub enum EngineError {
 pub struct Handle {
     pub session: Shared,
     stops: Arc<Mutex<HashMap<String, EncodeStop>>>,
+    alive: Arc<AtomicBool>,
+    ipc_port: Arc<Mutex<Option<u16>>>,
 }
 
 impl Clone for Handle {
     fn clone(&self) -> Self {
-        Self { session: Arc::clone(&self.session), stops: Arc::clone(&self.stops) }
+        Self {
+            session: Arc::clone(&self.session),
+            stops: Arc::clone(&self.stops),
+            alive: Arc::clone(&self.alive),
+            ipc_port: Arc::clone(&self.ipc_port),
+        }
     }
 }
 
@@ -71,7 +80,12 @@ impl Handle {
     pub fn open_core() -> Result<Self, EngineError> {
         paths::ensure_dirs()?;
         let session = Session::load()?;
-        Ok(Handle { session: Arc::new(Mutex::new(session)), stops: Arc::new(Mutex::new(HashMap::new())) })
+        Ok(Handle {
+            session: Arc::new(Mutex::new(session)),
+            stops: Arc::new(Mutex::new(HashMap::new())),
+            alive: Arc::new(AtomicBool::new(true)),
+            ipc_port: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn open_in(dir: PathBuf) -> Result<Self, EngineError> {
@@ -124,7 +138,7 @@ impl Handle {
                 Ok(json!({ "ids": ids }))
             }
             "queue.start" => {
-                self.lock(|s| s.queue.running = true);
+                self.lock(|s| s.queue.start());
                 Ok(json!({ "running": true }))
             }
             "queue.pause" => {
@@ -160,7 +174,28 @@ impl Handle {
     }
 
     pub fn start_ipc(&self, port: u16) -> Result<IpcServer, EngineError> {
-        IpcServer::bind(port, self.clone())
+        let srv = IpcServer::bind(port, self.clone())?;
+        if let Ok(mut g) = self.ipc_port.lock() {
+            *g = Some(srv.port);
+        }
+        Ok(srv)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Persist, stop encodes, and unblock background loops so the process can exit.
+    pub fn shutdown(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+        self.stop_all();
+        self.persist();
+        if let Ok(g) = self.ipc_port.lock() {
+            if let Some(port) = *g {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(250));
+            }
+        }
     }
 
     pub fn stop_job(&self, id: &str) {
@@ -347,6 +382,7 @@ impl Session {
     pub fn resolve_pending_output_names(&mut self, ids: &[String]) {
         let allow = self.settings.allow_overwrite;
         let ff = self.ffmpeg.as_ref().ok().cloned();
+        let presets = self.presets.clone();
         for id in ids {
             let Some(job) = self.queue.jobs.iter_mut().find(|j| j.id == *id) else {
                 continue;
@@ -364,6 +400,7 @@ impl Session {
             if let Some((w, h)) = size {
                 let _ = job.apply_resolved_size(w, h, allow);
             }
+            job.refresh_auto_preset(&presets);
         }
     }
 
@@ -391,7 +428,7 @@ impl Session {
 }
 
 fn drain_inbox_loop(h: Handle) {
-    loop {
+    while h.is_alive() {
         drain_inbox(&h);
         thread::sleep(Duration::from_millis(750));
     }

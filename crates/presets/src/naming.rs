@@ -259,6 +259,7 @@ mod tests {
             format: OutputFormat::H264Mp4,
             video: VideoSettings { width: Some(1920), height: Some(1080), ..VideoSettings::default() },
             audio: Default::default(),
+            one_off: false,
         }
     }
 

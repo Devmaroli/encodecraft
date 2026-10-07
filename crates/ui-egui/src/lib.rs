@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, DropOutcome, Handle};
 use encodecraft_job::{ScaleMode, ScreenSize, PRODUCT};
-use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, PresetReason, Quality};
+use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
 use crate::theme::{ThemeKind, Tokens};
@@ -86,6 +86,10 @@ impl EncodeApp {
 
 impl eframe::App for EncodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.handle.shutdown();
+            std::process::exit(0);
+        }
         theme::apply(ctx, &self.tokens);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
@@ -121,8 +125,8 @@ impl eframe::App for EncodeApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.handle.persist();
-        encodecraft_engine::clear_lock();
+        self.handle.shutdown();
+        std::process::exit(0);
     }
 }
 
@@ -244,7 +248,7 @@ impl EncodeApp {
                         self.pick_sources();
                         ui.close();
                     }
-                    if ui.button("One source → many sizes…").clicked() {
+                    if ui.button("One source -> many sizes…").clicked() {
                         self.show_batch = true;
                         ui.close();
                     }
@@ -264,7 +268,7 @@ impl EncodeApp {
                 });
                 ui.menu_button("Queue", |ui| {
                     if ui.button("Start queue").clicked() {
-                        self.handle.lock(|s| s.queue.running = true);
+                        self.handle.lock(|s| s.queue.start());
                         ui.close();
                     }
                     if ui.button("Pause queue").clicked() {
@@ -307,14 +311,14 @@ impl EncodeApp {
             |ui| {
                 ui.horizontal(|ui| {
                     let running = self.handle.lock(|s| s.queue.running);
-                    let start = egui::Button::new(if running { "  Queue running  " } else { "  ▶  Start queue  " });
+                    let start = egui::Button::new(if running { "  Queue running  " } else { "  Start queue  " });
                     if ui.add(start.fill(if running { t.cache_green } else { t.accent })).clicked() {
-                        self.handle.lock(|s| s.queue.running = true);
+                        self.handle.lock(|s| s.queue.start());
                     }
-                    if ui.button("  ⏸  Pause  ").clicked() {
+                    if ui.button("  Pause  ").clicked() {
                         self.handle.lock(|s| s.queue.running = false);
                     }
-                    if ui.button("  ⏹  Stop  ").clicked() {
+                    if ui.button("  Stop  ").clicked() {
                         self.handle.stop_all();
                     }
                     ui.separator();
@@ -333,18 +337,18 @@ impl EncodeApp {
                             let _ = self.handle.lock(|s| s.queue.remove(&id));
                         }
                     }
-                    if ui.button("↑").clicked() {
+                    if ui.button("Up").clicked() {
                         if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
                             let _ = self.handle.lock(|s| s.queue.move_job(&id, -1));
                         }
                     }
-                    if ui.button("↓").clicked() {
+                    if ui.button("Down").clicked() {
                         if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
                             let _ = self.handle.lock(|s| s.queue.move_job(&id, 1));
                         }
                     }
                     ui.separator();
-                    if ui.button("One → many sizes").clicked() {
+                    if ui.button("One -> many sizes").clicked() {
                         self.show_batch = true;
                     }
                     ui.separator();
@@ -469,8 +473,16 @@ impl EncodeApp {
         let filter = self.preset_filter.to_ascii_lowercase();
         let (presets, screens) = self.handle.lock(|s| (s.presets.all(), s.presets.screens.clone()));
         egui::ScrollArea::vertical().id_salt("preset-scroll").show(ui, |ui| {
+            ui.label(RichText::new("Studio").small().color(t.text_faint));
+            for p in presets.iter().filter(|p| PresetLibrary::is_studio_system(&p.id)) {
+                if !filter.is_empty() && !p.name.to_ascii_lowercase().contains(&filter) {
+                    continue;
+                }
+                self.preset_row(ui, p);
+            }
+            ui.add_space(6.0);
             ui.label(RichText::new("System").small().color(t.text_faint));
-            for p in presets.iter().filter(|p| p.kind == PresetKind::System) {
+            for p in presets.iter().filter(|p| p.kind == PresetKind::System && !PresetLibrary::is_studio_system(&p.id)) {
                 if !filter.is_empty() && !p.name.to_ascii_lowercase().contains(&filter) {
                     continue;
                 }
@@ -533,6 +545,7 @@ impl EncodeApp {
                             if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == sel) {
                                 let w = j.preset.video.width;
                                 let h = j.preset.video.height;
+                                s.presets.remember_manual_choice(&j.source, j.screen.as_ref(), &pr);
                                 j.preset = pr;
                                 if let (Some(w), Some(h)) = (w, h) {
                                     j.preset.video.width = Some(w);
@@ -544,6 +557,7 @@ impl EncodeApp {
                             }
                         }
                     });
+                    self.handle.persist();
                 }
             }
             if resp.double_clicked() {
@@ -588,6 +602,7 @@ impl EncodeApp {
                         next.video.width = w;
                         next.video.height = h;
                         next.video.scale = job.scale;
+                        self.handle.lock(|s| s.presets.remember_manual_choice(&job.source, job.screen.as_ref(), p));
                         job.preset = next;
                         job.preset_overridden = true;
                         job.preset_reason = Some(PresetReason::Manual);
@@ -599,7 +614,14 @@ impl EncodeApp {
                 ui.label(RichText::new(format!("({label})")).color(t.text_dim).italics());
             }
             if job.preset_overridden && ui.small_button("Reset auto").clicked() {
-                if let Some(pick) = self.handle.lock(|s| s.presets.screen_rules.pick(job.screen.as_ref(), &job.source.display_name())) {
+                self.handle.lock(|s| s.presets.clear_sticky(&job.source, job.screen.as_ref()));
+                if let Some(pick) = self.handle.lock(|s| {
+                    let px = match (job.preset.video.width, job.preset.video.height) {
+                        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+                        _ => None,
+                    };
+                    s.presets.screen_rules.pick(job.screen.as_ref(), &job.source.display_name(), px)
+                }) {
                     if let Ok(pr) = self.handle.lock(|s| s.presets.get(&pick.preset_id)) {
                         let w = job.preset.video.width;
                         let h = job.preset.video.height;
@@ -745,7 +767,7 @@ impl EncodeApp {
                 if let Some(info) = self.handle.lock(|s| s.probe_job(&job)) {
                     ui.label(info.summary());
                 }
-                ui.label(format!("→ {}", job.output.display()));
+                ui.label(format!("-> {}", job.output.display()));
             });
             ui.add_space(16.0);
             if let Some(tex) = self.ensure_thumb(ui.ctx(), &job) {
@@ -849,6 +871,21 @@ impl EncodeApp {
         ui.add(egui::TextEdit::multiline(&mut self.rules_ultra).desired_width(480.0).desired_rows(3));
         ui.label("Better Res listed screens  (Name | aliases | WxH)");
         ui.add(egui::TextEdit::multiline(&mut self.rules_listed).desired_width(480.0).desired_rows(6));
+        ui.add_space(8.0);
+        ui.label(RichText::new("One-off presets").strong());
+        ui.label(
+            RichText::new("These are never remembered as a manual choice. The next send of that comp goes back to Auto (Better Res / Installation) or the default.")
+                .small()
+                .color(self.t().text_dim),
+        );
+        let one_offs = self.handle.lock(|x| x.presets.one_off_presets());
+        if one_offs.is_empty() {
+            ui.label(RichText::new("None yet — tick One-off on a preset, or name one Sultan.").small().color(self.t().text_dim));
+        } else {
+            for p in &one_offs {
+                ui.label(format!("• {}  ({})", p.name, p.id));
+            }
+        }
         if ui.button("Apply settings").clicked() {
             self.handle.lock(|sess| {
                 sess.settings = s.clone();
@@ -1003,7 +1040,7 @@ impl EncodeApp {
             self.batch_sizes = screens.iter().map(|s| matches!((s.width, s.height), (1920, 1080) | (1080, 1920) | (1200, 960) | (1080, 864))).collect();
         }
         let mut close = false;
-        egui::Window::new("One source → many sizes").open(&mut open).default_width(420.0).show(ctx, |ui| {
+        egui::Window::new("One source -> many sizes").open(&mut open).default_width(420.0).show(ctx, |ui| {
             ui.label("Pick sources and the DOOH sizes to emit. Each size becomes its own queue item.");
             for (i, sz) in screens.iter().enumerate() {
                 if let Some(flag) = self.batch_sizes.get_mut(i) {
@@ -1084,6 +1121,19 @@ impl EncodeApp {
                         ui.add(egui::Slider::new(value, 1..=100).text("quality"));
                     }
                 }
+                ui.checkbox(&mut p.audio.enabled, "Include audio");
+                if p.audio.enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("Audio kbps");
+                        ui.add(egui::DragValue::new(&mut p.audio.bitrate_kbps).range(32..=512));
+                    });
+                }
+                ui.checkbox(&mut p.one_off, "One-off (don't remember as manual choice)");
+                ui.label(
+                    RichText::new("One-off presets (Approval Res, Sultan) revert to Auto on the next send of that comp.")
+                        .small()
+                        .color(dim),
+                );
                 if ui.button("Save preset").clicked() {
                     save = true;
                 }

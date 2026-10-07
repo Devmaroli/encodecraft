@@ -29,15 +29,15 @@ pub struct IpcServer {
 impl IpcServer {
     pub fn bind(port: u16, handle: Handle) -> Result<Self, EngineError> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
-        listener.set_nonblocking(false)?;
+        listener.set_nonblocking(true)?;
         let actual = listener.local_addr()?.port();
         let live = std::sync::Arc::new(AtomicUsize::new(0));
         thread::Builder::new()
             .name("encodecraft-ipc".into())
             .spawn(move || {
-                for conn in listener.incoming() {
-                    match conn {
-                        Ok(s) => {
+                while handle.is_alive() {
+                    match listener.accept() {
+                        Ok((s, _)) => {
                             if live.load(Ordering::SeqCst) >= MAX_CONNS {
                                 let _ = write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
                                 continue;
@@ -49,6 +49,9 @@ impl IpcServer {
                                 handle_conn(s, h);
                                 live.fetch_sub(1, Ordering::SeqCst);
                             });
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::Interrupted => {
+                            thread::sleep(Duration::from_millis(50));
                         }
                         Err(_) => break,
                     }

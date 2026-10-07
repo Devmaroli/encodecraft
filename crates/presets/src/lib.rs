@@ -14,11 +14,13 @@ pub use screen_rules::{
 
 pub const BETTER_RES_ID: &str = "system.better-res";
 pub const INSTALLATION_ID: &str = "system.installation";
+pub const APPROVAL_RES_ID: &str = "system.approval-res";
+pub const SULTAN_ID: &str = "system.sultan";
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use encodecraft_job::{ScaleMode, ScreenSize};
+use encodecraft_job::{JobSource, ScaleMode, ScreenSize};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -293,6 +295,9 @@ pub struct ExportPreset {
     pub video: VideoSettings,
     #[serde(default)]
     pub audio: AudioSettings,
+    /// One-off (Approval Res, Sultan, …): do not remember as the manual choice for this comp.
+    #[serde(default)]
+    pub one_off: bool,
 }
 
 impl ExportPreset {
@@ -337,6 +342,19 @@ pub struct PresetLibrary {
     /// Automatic Better Res / Installation assignment. Editable in Settings.
     #[serde(default)]
     pub screen_rules: ScreenPresetRules,
+    /// Manual preset choices that stick on the next EffectCraft send / re-queue of the same comp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sticky_manuals: Vec<StickyManual>,
+}
+
+/// Remembered per-comp manual preset (`project + comp + screen`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StickyManual {
+    pub project: String,
+    pub comp: String,
+    #[serde(default)]
+    pub screen: String,
+    pub preset_id: String,
 }
 
 impl Default for PresetLibrary {
@@ -347,7 +365,13 @@ impl Default for PresetLibrary {
 
 impl PresetLibrary {
     pub fn new() -> Self {
-        Self { user: Vec::new(), screens: builtin_screens(), system_overrides: Vec::new(), screen_rules: ScreenPresetRules::default() }
+        Self {
+            user: Vec::new(),
+            screens: builtin_screens(),
+            system_overrides: Vec::new(),
+            screen_rules: ScreenPresetRules::default(),
+            sticky_manuals: Vec::new(),
+        }
     }
 
     pub fn builtins() -> Vec<ExportPreset> {
@@ -400,6 +424,9 @@ impl PresetLibrary {
             return Err(PresetError::Message("cannot overwrite a system preset; duplicate it first".into()));
         }
         preset.kind = PresetKind::User;
+        if Self::name_suggests_one_off(&preset.name) && !self.user.iter().any(|p| p.id == preset.id) {
+            preset.one_off = true;
+        }
         if let Some(existing) = self.user.iter_mut().find(|p| p.id == preset.id) {
             *existing = preset;
         } else {
@@ -410,7 +437,7 @@ impl PresetLibrary {
 
     /// Save a user preset, or persist bitrate/fps edits on the studio system presets.
     pub fn save_preset(&mut self, mut preset: ExportPreset) -> Result<(), PresetError> {
-        if preset.id == BETTER_RES_ID || preset.id == INSTALLATION_ID {
+        if Self::is_studio_system(&preset.id) {
             preset.kind = PresetKind::System;
             if let Some(existing) = self.system_overrides.iter_mut().find(|p| p.id == preset.id) {
                 *existing = preset;
@@ -419,11 +446,78 @@ impl PresetLibrary {
             }
             return Ok(());
         }
+        if Self::name_suggests_one_off(&preset.name) && !self.user.iter().any(|p| p.id == preset.id) {
+            preset.one_off = true;
+        }
         self.upsert_user(preset)
     }
 
     pub fn is_studio_system(id: &str) -> bool {
-        id == BETTER_RES_ID || id == INSTALLATION_ID
+        id == BETTER_RES_ID || id == INSTALLATION_ID || id == APPROVAL_RES_ID || id == SULTAN_ID
+    }
+
+    pub fn name_suggests_one_off(name: &str) -> bool {
+        name.to_ascii_lowercase().contains("sultan")
+    }
+
+    pub fn is_one_off(&self, preset: &ExportPreset) -> bool {
+        preset.one_off || Self::name_suggests_one_off(&preset.name)
+    }
+
+    pub fn one_off_presets(&self) -> Vec<ExportPreset> {
+        self.all().into_iter().filter(|p| self.is_one_off(p)).collect()
+    }
+
+    pub fn sticky_parts(source: &JobSource, screen: Option<&ScreenSize>) -> (String, String, String) {
+        let (project, comp) = match source {
+            JobSource::File { path, .. } => (path.to_string_lossy().into_owned(), String::new()),
+            JobSource::EffectCraft { project, comp, .. } => (project.to_string_lossy().into_owned(), comp.clone().unwrap_or_default()),
+        };
+        let screen = screen
+            .map(|s| {
+                if s.name.trim().is_empty() {
+                    s.label()
+                } else {
+                    s.name.clone()
+                }
+            })
+            .unwrap_or_default();
+        (project, comp, screen)
+    }
+
+    fn sticky_matches(entry: &StickyManual, project: &str, comp: &str, screen: &str) -> bool {
+        entry.project.eq_ignore_ascii_case(project) && entry.comp.eq_ignore_ascii_case(comp) && entry.screen.eq_ignore_ascii_case(screen)
+    }
+
+    pub fn get_sticky(&self, source: &JobSource, screen: Option<&ScreenSize>) -> Option<String> {
+        let (project, comp, screen) = Self::sticky_parts(source, screen);
+        self.sticky_manuals
+            .iter()
+            .find(|s| Self::sticky_matches(s, &project, &comp, &screen))
+            .map(|s| s.preset_id.clone())
+    }
+
+    pub fn set_sticky(&mut self, source: &JobSource, screen: Option<&ScreenSize>, preset_id: String) {
+        let (project, comp, screen) = Self::sticky_parts(source, screen);
+        if let Some(existing) = self.sticky_manuals.iter_mut().find(|s| Self::sticky_matches(s, &project, &comp, &screen)) {
+            existing.preset_id = preset_id;
+        } else {
+            self.sticky_manuals.push(StickyManual { project, comp, screen, preset_id });
+        }
+    }
+
+    pub fn clear_sticky(&mut self, source: &JobSource, screen: Option<&ScreenSize>) {
+        let (project, comp, screen) = Self::sticky_parts(source, screen);
+        self.sticky_manuals.retain(|s| !Self::sticky_matches(s, &project, &comp, &screen));
+    }
+
+    /// Persist a manual pick unless the preset is one-off (Approval Res, Sultan, …).
+    pub fn remember_manual_choice(&mut self, source: &JobSource, screen: Option<&ScreenSize>, preset: &ExportPreset) {
+        if self.is_one_off(preset) {
+            self.clear_sticky(source, screen);
+            return;
+        }
+        self.set_sticky(source, screen, preset.id.clone());
     }
 
     pub fn remove_user(&mut self, id: &str) -> Result<(), PresetError> {
@@ -440,6 +534,9 @@ impl PresetLibrary {
         p.kind = PresetKind::User;
         p.name = new_name.to_string();
         p.id = unique_user_id(&self.user, new_name);
+        if Self::name_suggests_one_off(new_name) {
+            p.one_off = true;
+        }
         self.user.push(p.clone());
         Ok(p)
     }
@@ -569,8 +666,10 @@ fn slugify(s: &str) -> String {
 pub fn builtin_presets() -> Vec<ExportPreset> {
     vec![
         preset("system.h264-mp4", "H.264 Match Source", OutputFormat::H264Mp4, Quality::crf(23), true),
-        studio_h264(BETTER_RES_ID, "Better Res", 7.0, 8.0),
-        studio_h264(INSTALLATION_ID, "Installation", 5.0, 6.0),
+        studio_h264(BETTER_RES_ID, "Better Res", 7.0, 8.0, false),
+        studio_h264(INSTALLATION_ID, "Installation", 5.0, 6.0, false),
+        approval_res(),
+        sultan(),
         preset("system.hevc-mp4", "HEVC Match Source", OutputFormat::HevcMp4, Quality::crf(28), true),
         {
             let mut p = preset("system.prores-mov", "Apple ProRes 422", OutputFormat::ProResMov, Quality::Quality { value: 80 }, true);
@@ -619,10 +718,11 @@ fn preset(id: &str, name: &str, format: OutputFormat, quality: Quality, audio: b
         format,
         video: VideoSettings { quality, ..VideoSettings::default() },
         audio: AudioSettings { enabled: audio && format.ffmpeg_audio_codec().is_some(), ..AudioSettings::default() },
+        one_off: false,
     }
 }
 
-fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64) -> ExportPreset {
+fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64, one_off: bool) -> ExportPreset {
     ExportPreset {
         id: id.into(),
         name: name.into(),
@@ -636,7 +736,20 @@ fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64) -> ExportP
             ..VideoSettings::default()
         },
         audio: AudioSettings { enabled: true, ..AudioSettings::default() },
+        one_off,
     }
+}
+
+fn approval_res() -> ExportPreset {
+    let mut p = studio_h264(APPROVAL_RES_ID, "Approval Res", 1.0, 1.2, true);
+    p.audio.bitrate_kbps = 128;
+    p
+}
+
+fn sultan() -> ExportPreset {
+    let mut p = studio_h264(SULTAN_ID, "Sultan", 2.0, 3.0, true);
+    p.audio.enabled = false;
+    p
 }
 
 /// Built-in digital-out-of-home (and common web/social) screen sizes.
@@ -802,5 +915,83 @@ mod tests {
         let lib = PresetLibrary::new();
         assert_eq!(lib.get_or_parse("Better Res").unwrap().id, BETTER_RES_ID);
         assert_eq!(lib.get_or_parse("installation").unwrap().id, INSTALLATION_ID);
+        assert_eq!(lib.get_or_parse("Approval Res").unwrap().id, APPROVAL_RES_ID);
+        assert_eq!(lib.get_or_parse("Sultan").unwrap().id, SULTAN_ID);
+    }
+
+    #[test]
+    fn approval_res_is_one_off_1mbps_with_audio() {
+        let lib = PresetLibrary::new();
+        let p = lib.get(APPROVAL_RES_ID).unwrap();
+        assert!(p.one_off);
+        assert_eq!(p.video.frame_rate, FrameRate::Custom(25.0));
+        assert_eq!(p.video.quality, Quality::vbr_2pass(1.0, 1.2));
+        assert!(p.audio.enabled);
+        assert_eq!(p.audio.bitrate_kbps, 128);
+        assert!(p.video.width.is_none());
+        assert!(p.video.height.is_none());
+        assert!(lib.one_off_presets().iter().any(|x| x.id == APPROVAL_RES_ID));
+    }
+
+    #[test]
+    fn sultan_studio_is_one_off_2_3_mbps_without_audio() {
+        let lib = PresetLibrary::new();
+        let p = lib.get(SULTAN_ID).unwrap();
+        assert_eq!(p.name, "Sultan");
+        assert!(p.one_off);
+        assert_eq!(p.video.frame_rate, FrameRate::Custom(25.0));
+        assert_eq!(p.video.quality, Quality::vbr_2pass(2.0, 3.0));
+        assert!(!p.audio.enabled);
+        assert!(p.video.width.is_none());
+        assert!(p.video.height.is_none());
+        assert!(lib.one_off_presets().iter().any(|x| x.id == SULTAN_ID));
+    }
+
+    #[test]
+    fn sultan_named_user_preset_defaults_to_one_off() {
+        let mut lib = PresetLibrary::new();
+        let mut p = lib.get("system.h264-mp4").unwrap();
+        p.id = "user.sultan-screen".into();
+        p.name = "Sultan Screen".into();
+        p.one_off = false;
+        lib.upsert_user(p).unwrap();
+        let saved = lib.get("user.sultan-screen").unwrap();
+        assert!(saved.one_off);
+    }
+
+    #[test]
+    fn sticky_manual_better_res_persists_approval_res_does_not() {
+        let mut lib = PresetLibrary::new();
+        let source = JobSource::EffectCraft {
+            project: PathBuf::from("C:/work/spot.ecproj"),
+            comp: Some("Main".into()),
+            mezzanine: "prores".into(),
+            work_area: false,
+            width: None,
+            height: None,
+        };
+        let screen = ScreenSize::new("Honor 400", 1080, 1080);
+        let better = lib.get(BETTER_RES_ID).unwrap();
+        lib.remember_manual_choice(&source, Some(&screen), &better);
+        assert_eq!(lib.get_sticky(&source, Some(&screen)).as_deref(), Some(BETTER_RES_ID));
+
+        let approval = lib.get(APPROVAL_RES_ID).unwrap();
+        lib.remember_manual_choice(&source, Some(&screen), &approval);
+        assert_eq!(lib.get_sticky(&source, Some(&screen)), None);
+
+        lib.remember_manual_choice(&source, Some(&screen), &better);
+        assert_eq!(lib.get_sticky(&source, Some(&screen)).as_deref(), Some(BETTER_RES_ID));
+
+        let sultan = lib.get(SULTAN_ID).unwrap();
+        lib.remember_manual_choice(&source, Some(&screen), &sultan);
+        assert_eq!(lib.get_sticky(&source, Some(&screen)), None);
+
+        lib.remember_manual_choice(&source, Some(&screen), &better);
+        let mut named = lib.get("system.h264-mp4").unwrap();
+        named.id = "user.sultan-screen".into();
+        named.name = "Sultan Screen".into();
+        named.one_off = true;
+        lib.remember_manual_choice(&source, Some(&screen), &named);
+        assert_eq!(lib.get_sticky(&source, Some(&screen)), None);
     }
 }

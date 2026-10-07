@@ -13,7 +13,7 @@ use crate::Handle;
 
 pub fn run(h: Handle) {
     let mut ticks = 0u64;
-    loop {
+    while h.is_alive() {
         thread::sleep(Duration::from_millis(250));
         ticks = ticks.wrapping_add(1);
         if ticks % 20 == 0 {

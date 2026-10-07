@@ -69,15 +69,23 @@ the composition raster in the `.ecproj`, or a probe of the rendered mezzanine / 
 not the literal `srcxsrc` placeholder.
 
 When `sizes[].name` (or the source file name / `{screen}` token) identifies a screen and
-`preset_id` is H.264 / Better Res / Installation / `auto`, EncodeCraft assigns:
+`preset_id` is H.264 / Better Res / Installation / `auto` / empty / `system.auto`, EncodeCraft assigns:
 
 - **Better Res** (`system.better-res`) — ultra-wide landscape (`width/height > 5`),
   the name exception **The Avenues Gate**, and listed screens (1st Ring Road,
   Al Nassar Tower Vertical, Avenues Frame entrances). Reason shown on the queue:
   `ultra wide` or `listed screen`.
-- **Installation** (`system.installation`) — every other named/sized screen.
+- **Installation** (`system.installation`) — every other named/sized screen, and the
+  fallback when EffectCraft sends Match Source / `auto` with no matching screen rule
+  (`installation default`).
 
-Rules are stored in `presets.json` (`screen_rules`) and can be edited in Settings.
+`preset_id: "auto"` is documented for senders that do not want to pick a preset.
+
+A **manual** pick of Better Res / Installation / other non-one-off presets **sticks** on
+the next EffectCraft send of the same project + comp + screen. **One-off** presets do not:
+**Approval Res** and **Sultan** (and any preset named with “Sultan”) revert to Auto.
+
+Rules are stored in `presets.json` (`screen_rules`, `sticky_manuals`) and can be edited in Settings.
 
 ### EffectCraft composition source
 
@@ -118,13 +126,20 @@ split After Effects / Media Encoder uses.
 
 ## Builtin preset ids
 
-`system.h264-mp4` `system.better-res` `system.installation` `system.hevc-mp4`
+`system.h264-mp4` `system.better-res` `system.installation` `system.approval-res`
+`system.sultan` `system.hevc-mp4`
 `system.prores-mov` `system.webm-vp9` `system.gif`
 `system.png-sequence` `system.jpeg-sequence` `system.aac` `system.wav` `system.mp3`
 
-Studio H.264: **Better Res** is High @ 25 fps CFR, VBR 2-pass 7/8 Mbps; **Installation**
-is the same at 5/6 Mbps. Canvases with any side > 4096 use H.264 level 6.2. If the
-frame exceeds level 6.2, the queue item is flagged in-app instead of failing silently.
+Studio H.264 (all High @ 25 fps CFR, match source size unless a screen size is set):
+
+- **Better Res** — VBR 2-pass 7/8 Mbps, AAC 192 kbps
+- **Installation** — VBR 2-pass 5/6 Mbps, AAC 192 kbps
+- **Approval Res** — VBR 2-pass 1/1.2 Mbps, AAC 128 kbps; **one-off** (not remembered)
+- **Sultan** — VBR 2-pass 2/3 Mbps, **no audio**; **one-off** (not remembered)
+
+Canvases with any side > 4096 use H.264 level 6.2. If the frame exceeds level 6.2, the
+queue item is flagged in-app instead of failing silently.
 
 ## Inbox fallback
 

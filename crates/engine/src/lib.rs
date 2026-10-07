@@ -13,7 +13,9 @@ mod token;
 mod watch;
 mod worker;
 
-pub use drops::{classify_dropped_paths, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop};
+pub use drops::{
+    classify_dropped_paths, ecproj_comp_size, ecproj_comp_size_file, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop,
+};
 pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, set_home};
 pub use persist::Settings;
@@ -100,6 +102,7 @@ impl Handle {
     fn enqueue_with(&self, req: EnqueueRequest, clamp_output: bool) -> Result<Vec<String>, EngineError> {
         self.lock(|s| {
             let ids = s.queue.enqueue(&req, &s.presets, &s.settings.output_dir, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
+            s.resolve_pending_output_names(&ids);
             let _ = s.save();
             Ok(ids)
         })
@@ -279,7 +282,9 @@ impl Session {
             scale: None,
             start_queue: false,
         };
-        self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false).map_err(Into::into)
+        let ids = self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?;
+        self.resolve_pending_output_names(&ids);
+        Ok(ids)
     }
 
     pub fn add_drop_outcome(&mut self, outcome: &DropOutcome, preset_id: &str) -> Result<Vec<String>, EngineError> {
@@ -300,7 +305,14 @@ impl Session {
         let chosen: Vec<Option<String>> = if comps.is_empty() { vec![None] } else { comps.iter().cloned().map(Some).collect() };
         let mut ids = Vec::new();
         for comp in chosen {
-            let source = JobSource::EffectCraft { project: project.clone(), comp, mezzanine: "prores".into(), work_area: false };
+            let source = JobSource::EffectCraft {
+                project: project.clone(),
+                comp,
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: None,
+                height: None,
+            };
             ids.extend(self.enqueue_user_source(source, preset_id)?);
         }
         if let Some(last) = ids.last() {
@@ -324,9 +336,35 @@ impl Session {
                 scale: None,
                 start_queue: false,
             };
-            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?);
+            let added = self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?;
+            self.resolve_pending_output_names(&added);
+            ids.extend(added);
         }
         Ok(ids)
+    }
+
+    /// Fill `{width}`/`{height}` from a file probe or the EffectCraft `.ecproj` when Match Source left them as `src`.
+    pub fn resolve_pending_output_names(&mut self, ids: &[String]) {
+        let allow = self.settings.allow_overwrite;
+        let ff = self.ffmpeg.as_ref().ok().cloned();
+        for id in ids {
+            let Some(job) = self.queue.jobs.iter_mut().find(|j| j.id == *id) else {
+                continue;
+            };
+            if !job.size_name_pending {
+                continue;
+            }
+            let size = job.source.pixel_size().or_else(|| match &job.source {
+                JobSource::File { path, .. } => {
+                    let p = path.clone();
+                    ff.as_ref().and_then(|f| probe(f, &p).ok()).map(|m| (m.width(), m.height())).filter(|(w, h)| *w > 0 && *h > 0)
+                }
+                JobSource::EffectCraft { project, comp, .. } => ecproj_comp_size_file(project, comp.as_deref()),
+            });
+            if let Some((w, h)) = size {
+                let _ = job.apply_resolved_size(w, h, allow);
+            }
+        }
     }
 
     pub fn probe_job(&self, job: &Job) -> Option<encodecraft_ffmpeg::MediaInfo> {
@@ -575,6 +613,32 @@ mod tests {
         h.lock(|s| match &s.queue.jobs[0].source {
             JobSource::File { sequence_start, .. } => assert_eq!(*sequence_start, Some(1)),
             JobSource::EffectCraft { .. } => panic!("expected file sequence"),
+        });
+    }
+
+    #[test]
+    fn effectcraft_match_source_names_from_comp_size() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        let out = home.join("exports");
+        std::fs::create_dir_all(&out).unwrap();
+        h.lock(|s| {
+            s.settings.output_dir = out.clone();
+            s.settings.naming = "{name}_{width}x{height}".into();
+        });
+        let project = home.join("test-2.ecproj");
+        std::fs::write(&project, br#"{"compositions":[{"name":"Honor 400_EN.ai Comp","width":1080,"height":1080}]}"#).unwrap();
+        let ids = h
+            .lock(|s| s.add_effectcraft_comps(project, &["Honor 400_EN.ai Comp".into()], "system.h264-mp4"))
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        h.lock(|s| {
+            let name = s.queue.jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.contains("1080x1080"), "{name}");
+            assert!(!name.contains("srcxsrc"), "{name}");
+            assert!(!s.queue.jobs[0].size_name_pending);
         });
     }
 }

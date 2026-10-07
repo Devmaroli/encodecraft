@@ -95,8 +95,26 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
 
     let source_file = resolve_source(h, &job, &stop)?;
     let media = probe(&ff, &source_file).ok();
+    let mut job = job;
     if let Some(ref m) = media {
-        h.lock(|s| s.push_log(format!("{}: {}", job.id, m.summary())));
+        let allow = h.lock(|s| s.settings.allow_overwrite);
+        let renamed = job.apply_resolved_size(m.width(), m.height(), allow);
+        h.lock(|s| {
+            if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
+                j.output = job.output.clone();
+                j.preset.video.width = job.preset.video.width;
+                j.preset.video.height = job.preset.video.height;
+                j.size_name_pending = job.size_name_pending;
+                j.encode_warning = job.encode_warning.clone();
+            }
+            s.push_log(format!("{}: {}", job.id, m.summary()));
+            if renamed {
+                s.push_log(format!("{}: output {}", job.id, job.output.display()));
+            }
+        });
+    }
+    if let Some(msg) = job.encode_warning.clone() {
+        return Err(crate::EngineError::Message(msg));
     }
 
     let hid = id.to_string();

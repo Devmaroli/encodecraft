@@ -48,6 +48,8 @@ pub fn send(params: SendParams) -> Result<Vec<String>, String> {
             comp: params.comp,
             mezzanine: "prores".into(),
             work_area: params.work_area,
+            width: None,
+            height: None,
         },
         preset_id: params.preset_id,
         preset_override: None,

@@ -74,6 +74,12 @@ pub struct Job {
     /// Non-fatal / pre-encode flag (H.264 cannot encode this raster).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_warning: Option<String>,
+    /// Naming template used when this job was queued (so we can rebuild `{width}x{height}` later).
+    #[serde(default = "default_job_naming")]
+    pub naming: String,
+    /// Output name still has unresolved `{width}`/`{height}` (`srcxsrc`).
+    #[serde(default)]
+    pub size_name_pending: bool,
     pub status: JobStatus,
     #[serde(default)]
     pub progress: ProgressSnap,
@@ -103,6 +109,50 @@ impl From<&EncodeProgress> for ProgressSnap {
     }
 }
 
+impl Job {
+    /// Fill match-source dimensions and rebuild `{width}x{height}` once the real size is known.
+    /// Returns true if the output path changed.
+    pub fn apply_resolved_size(&mut self, width: u32, height: u32, allow_overwrite: bool) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let w = self.preset.video.width.filter(|n| *n > 0).unwrap_or(width);
+        let h = self.preset.video.height.filter(|n| *n > 0).unwrap_or(height);
+        if self.preset.video.width.unwrap_or(0) == 0 {
+            self.preset.video.width = Some(w);
+        }
+        if self.preset.video.height.unwrap_or(0) == 0 {
+            self.preset.video.height = Some(h);
+        }
+        self.encode_warning = h264_unencodable_message(&self.preset, w, h);
+        let fname = self.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let pending = self.size_name_pending || fname.contains("srcxsrc") || fname.contains("_src.") || fname.contains("xsrc.");
+        if !pending {
+            return false;
+        }
+        let dir = self.output.parent().map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let naming = if self.naming.is_empty() { default_template() } else { self.naming.as_str() };
+        let ctx = NamingContext::from_preset(
+            &self.source.display_name(),
+            &self.preset,
+            w,
+            h,
+            &self.id,
+            1,
+            self.screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""),
+        );
+        let base = output_path(&dir, naming, &ctx, self.preset.format.is_sequence());
+        let next = unique_output_path(base, allow_overwrite);
+        if next == self.output {
+            self.size_name_pending = false;
+            return false;
+        }
+        self.output = next;
+        self.size_name_pending = false;
+        true
+    }
+}
+
 static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn new_id(prefix: &str) -> String {
@@ -126,6 +176,10 @@ pub struct EncodeQueue {
 
 fn default_parallel() -> usize {
     2
+}
+
+fn default_job_naming() -> String {
+    default_template().into()
 }
 
 impl EncodeQueue {
@@ -265,6 +319,16 @@ impl EncodeQueue {
                     pr.video.height = Some(sz.height);
                 }
             }
+            if pr.video.width.unwrap_or(0) == 0 || pr.video.height.unwrap_or(0) == 0 {
+                if let Some((sw, sh)) = req.source.pixel_size() {
+                    if pr.video.width.unwrap_or(0) == 0 {
+                        pr.video.width = Some(sw);
+                    }
+                    if pr.video.height.unwrap_or(0) == 0 {
+                        pr.video.height = Some(sh);
+                    }
+                }
+            }
             let w = pr.video.width.unwrap_or(0);
             let h = pr.video.height.unwrap_or(0);
             let encode_warning = h264_unencodable_message(&pr, w, h);
@@ -302,6 +366,8 @@ impl EncodeQueue {
                 preset_reason,
                 preset_overridden,
                 encode_warning,
+                naming: naming.to_string(),
+                size_name_pending: w == 0 || h == 0,
                 status: JobStatus::Waiting,
                 progress: ProgressSnap::default(),
                 log: String::new(),
@@ -376,7 +442,7 @@ pub fn preview_name(source: &JobSource, preset: &ExportPreset, w: u32, h: u32, t
 #[cfg(test)]
 mod tests {
     use super::*;
-    use encodecraft_job::EnqueueRequest;
+    use encodecraft_job::{EnqueueRequest, JobSource};
     use std::path::PathBuf;
 
     fn req_many() -> EnqueueRequest {
@@ -479,5 +545,69 @@ mod tests {
         let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
         let msg = jobs[0].encode_warning.as_deref().unwrap_or("");
         assert!(msg.contains("H.264 cannot encode"), "{msg}");
+    }
+
+    #[test]
+    fn match_source_uses_effectcraft_comp_size_in_name() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/test-2.ecproj"),
+                comp: Some("Honor 400_EN.ai Comp".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(1080),
+                height: Some(1080),
+            },
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: Some("{name}_{width}x{height}".into()),
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}_{width}x{height}", false, true).unwrap();
+        let name = jobs[0].output.file_name().unwrap().to_string_lossy();
+        assert!(name.contains("1080x1080"), "{name}");
+        assert!(!name.contains("srcxsrc"), "{name}");
+        assert!(!jobs[0].size_name_pending);
+        assert_eq!(jobs[0].preset.video.width, Some(1080));
+        assert_eq!(jobs[0].preset.video.height, Some(1080));
+    }
+
+    #[test]
+    fn match_source_placeholder_renamed_after_probe() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/test-2.ecproj"),
+                comp: Some("Honor 400_EN.ai Comp".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: None,
+                height: None,
+            },
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: Some("{name}_{width}x{height}".into()),
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        let mut jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}_{width}x{height}", false, true).unwrap();
+        let before = jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(before.contains("srcxsrc"), "{before}");
+        assert!(jobs[0].size_name_pending);
+        assert!(jobs[0].apply_resolved_size(1080, 1080, true));
+        let after = jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(after.contains("1080x1080"), "{after}");
+        assert!(!after.contains("srcxsrc"), "{after}");
+        assert!(!jobs[0].size_name_pending);
     }
 }

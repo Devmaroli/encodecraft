@@ -64,6 +64,9 @@ Unknown schema values return HTTP 400 with a readable error.
 
 `sizes` empty → one job at the preset's resolution (match source if unset).
 `sizes` set → one queue item per size ("one source to many screens").
+Match-source `{width}`/`{height}` come from `source.width`/`source.height` (EffectCraft comp size),
+the composition raster in the `.ecproj`, or a probe of the rendered mezzanine / source file —
+not the literal `srcxsrc` placeholder.
 
 When `sizes[].name` (or the source file name / `{screen}` token) identifies a screen and
 `preset_id` is H.264 / Better Res / Installation / `auto`, EncodeCraft assigns:
@@ -91,7 +94,9 @@ split After Effects / Media Encoder uses.
     "project": "/work/spot.ecproj",
     "comp": "Main",
     "mezzanine": "prores",
-    "work_area": false
+    "work_area": false,
+    "width": 1080,
+    "height": 1080
   },
   "preset_id": "system.h264-mp4",
   "start_queue": true

@@ -48,7 +48,7 @@ pub enum FfmpegError {
 /// EffectCraft already has a renderer, and a raw-frame socket would couple the two apps.
 pub fn effectcraft_render_args(cli: &std::path::Path, source: &JobSource, mezzanine_out: &std::path::Path) -> Result<Vec<String>, FfmpegError> {
     match source {
-        JobSource::EffectCraft { project, comp, mezzanine, work_area } => {
+        JobSource::EffectCraft { project, comp, mezzanine, work_area, .. } => {
             let mut args = vec![
                 cli.to_string_lossy().into_owned(),
                 "render".into(),
@@ -90,7 +90,14 @@ mod tests {
 
     #[test]
     fn effectcraft_argv_includes_project_and_comp() {
-        let src = JobSource::EffectCraft { project: PathBuf::from("/p/main.ecproj"), comp: Some("Main".into()), mezzanine: "prores".into(), work_area: true };
+        let src = JobSource::EffectCraft {
+            project: PathBuf::from("/p/main.ecproj"),
+            comp: Some("Main".into()),
+            mezzanine: "prores".into(),
+            work_area: true,
+            width: None,
+            height: None,
+        };
         let args = effectcraft_render_args(std::path::Path::new("/bin/effectcraft-cli"), &src, std::path::Path::new("/tmp/m.mov")).unwrap();
         assert!(args.windows(2).any(|w| w[0] == "--project" && w[1].ends_with("main.ecproj")));
         assert!(args.windows(2).any(|w| w[0] == "--comp" && w[1] == "Main"));

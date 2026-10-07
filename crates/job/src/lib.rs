@@ -180,6 +180,11 @@ pub enum JobSource {
         /// Optional work-area-only render.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         work_area: bool,
+        /// Comp raster size when the sender knows it (used for `{width}`/`{height}` naming).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
     },
 }
 
@@ -221,6 +226,17 @@ impl JobSource {
         match self {
             JobSource::File { path, .. } => path,
             JobSource::EffectCraft { project, .. } => project,
+        }
+    }
+
+    /// Pixel size carried on the request (EffectCraft comp size). `None` until probed.
+    pub fn pixel_size(&self) -> Option<(u32, u32)> {
+        match self {
+            JobSource::EffectCraft { width, height, .. } => match (*width, *height) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+                _ => None,
+            },
+            JobSource::File { .. } => None,
         }
     }
 }
@@ -606,11 +622,12 @@ mod tests {
         assert_eq!(req.preset_id, "system.h264-mp4");
         assert!(req.start_queue);
         match req.source {
-            JobSource::EffectCraft { ref project, ref comp, ref mezzanine, work_area } => {
+            JobSource::EffectCraft { ref project, ref comp, ref mezzanine, work_area, width, height } => {
                 assert!(project.to_string_lossy().ends_with("spot.ecproj"));
                 assert_eq!(comp.as_deref(), Some("Main"));
                 assert_eq!(mezzanine, "prores");
                 assert!(!work_area);
+                assert!(width.is_none() && height.is_none());
             }
             JobSource::File { .. } => panic!("expected effectcraft source"),
         }
@@ -685,6 +702,32 @@ mod tests {
         };
         let s = String::from_utf8(req.to_vec().unwrap()).unwrap();
         assert!(!s.contains("sequence_start"));
+    }
+
+    #[test]
+    fn effectcraft_tagged_source_reads_comp_size() {
+        let json = r#"{
+            "schema": 1,
+            "source": {
+                "kind": "effectcraft",
+                "project": "C:\\work\\spot.ecproj",
+                "comp": "Honor 400_EN.ai Comp",
+                "width": 1080,
+                "height": 1080
+            },
+            "preset_id": "system.h264-mp4",
+            "start_queue": true
+        }"#;
+        let req = EnqueueRequest::from_json(json.as_bytes()).unwrap();
+        assert_eq!(req.source.pixel_size(), Some((1080, 1080)));
+        match req.source {
+            JobSource::EffectCraft { ref comp, width, height, .. } => {
+                assert_eq!(comp.as_deref(), Some("Honor 400_EN.ai Comp"));
+                assert_eq!(width, Some(1080));
+                assert_eq!(height, Some(1080));
+            }
+            JobSource::File { .. } => panic!("expected effectcraft"),
+        }
     }
 
     #[test]

@@ -187,6 +187,8 @@ fn build_request(args: &[String]) -> Result<EnqueueRequest, String> {
             comp: opt(args, "--comp").map(str::to_string),
             mezzanine: opt(args, "--mezzanine").unwrap_or("prores").to_string(),
             work_area: flag(args, "--work-area"),
+            width: None,
+            height: None,
         }
     } else {
         let file = pos(args, 0).ok_or("enqueue FILE  (or --project F.ecproj)")?;

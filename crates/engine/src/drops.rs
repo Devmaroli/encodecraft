@@ -262,6 +262,104 @@ pub fn list_ecproj_compositions_file(path: &Path) -> Result<Vec<String>, String>
     Ok(list_ecproj_compositions(&bytes))
 }
 
+/// Comp width×height from an `.ecproj` (best-effort). Used to fill `{width}`/`{height}` before encode.
+pub fn ecproj_comp_size(bytes: &[u8], comp: Option<&str>) -> Option<(u32, u32)> {
+    let v = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let mut found = Vec::new();
+    walk_comp_sizes(&v, None, &mut found);
+    if found.is_empty() {
+        return None;
+    }
+    if let Some(want) = comp.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((_, w, h)) = found.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(want)) {
+            return Some((*w, *h));
+        }
+        return None;
+    }
+    Some((found[0].1, found[0].2))
+}
+
+pub fn ecproj_comp_size_file(path: &Path, comp: Option<&str>) -> Option<(u32, u32)> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_ECPROJ_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    ecproj_comp_size(&bytes, comp)
+}
+
+fn walk_comp_sizes(v: &serde_json::Value, parent_key: Option<&str>, out: &mut Vec<(String, u32, u32)>) {
+    match v {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(map) = item.as_object() {
+                    if let Some(dims) = dims_of_map(map) {
+                        if let Some(n) = comp_name(item).or_else(|| map.get("name").or_else(|| map.get("id")).and_then(|x| x.as_str()).map(|s| s.to_string())) {
+                            out.push((n, dims.0, dims.1));
+                        }
+                    }
+                }
+                walk_comp_sizes(item, None, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if parent_key.is_some_and(key_is_comps) {
+                for (k, child) in map {
+                    if let Some(cm) = child.as_object() {
+                        if let Some(dims) = dims_of_map(cm) {
+                            let n = comp_name(child).unwrap_or_else(|| k.clone());
+                            out.push((n, dims.0, dims.1));
+                        }
+                    }
+                    walk_comp_sizes(child, None, out);
+                }
+                return;
+            }
+            if let Some(dims) = dims_of_map(map) {
+                if let Some(n) = typed_comp_name(map).or_else(|| map.get("name").and_then(|x| x.as_str()).map(|s| s.to_string())) {
+                    if map.contains_key("layers") || typed_comp_name(map).is_some() || parent_key.is_some_and(key_is_comps) {
+                        out.push((n, dims.0, dims.1));
+                    }
+                }
+            }
+            for (k, child) in map {
+                walk_comp_sizes(child, Some(k.as_str()), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn dims_of_map(map: &serde_json::Map<String, serde_json::Value>) -> Option<(u32, u32)> {
+    let num = |key: &str| -> Option<u32> {
+        let v = map.get(key)?;
+        let n = v
+            .as_u64()
+            .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .or_else(|| v.as_f64().map(|f| f.round() as u64))?;
+        if (1..100_000).contains(&n) {
+            Some(n as u32)
+        } else {
+            None
+        }
+    };
+    if let (Some(w), Some(h)) = (num("width").or_else(|| num("w")), num("height").or_else(|| num("h"))) {
+        return Some((w, h));
+    }
+    let sz = map.get("size").or_else(|| map.get("compSize"))?;
+    if let Some(arr) = sz.as_array() {
+        if arr.len() >= 2 {
+            let w = arr[0].as_u64().or_else(|| arr[0].as_f64().map(|f| f.round() as u64))?;
+            let h = arr[1].as_u64().or_else(|| arr[1].as_f64().map(|f| f.round() as u64))?;
+            if w > 0 && h > 0 && w < 100_000 && h < 100_000 {
+                return Some((w as u32, h as u32));
+            }
+        }
+        return None;
+    }
+    sz.as_object().and_then(dims_of_map)
+}
+
 fn walk_comps(v: &serde_json::Value, out: &mut Vec<String>, parent_key: Option<&str>) {
     match v {
         serde_json::Value::Array(arr) => {
@@ -435,6 +533,17 @@ mod tests {
         let d = br#"{"items":[{"type":"comp","name":"Open","layers":[]}]}"#;
         assert_eq!(list_ecproj_compositions(d), vec!["Open".to_string()]);
         assert!(list_ecproj_compositions(b"not json").is_empty());
+    }
+
+    #[test]
+    fn reads_comp_size_from_ecproj() {
+        let a = br#"{"compositions":[{"name":"Honor 400_EN.ai Comp","width":1080,"height":1080},{"name":"Other","width":1920,"height":1080}]}"#;
+        assert_eq!(ecproj_comp_size(a, Some("Honor 400_EN.ai Comp")), Some((1080, 1080)));
+        assert_eq!(ecproj_comp_size(a, Some("Other")), Some((1920, 1080)));
+        let b = br#"{"items":[{"type":"comp","name":"Square","layers":[],"width":1080,"height":1080}]}"#;
+        assert_eq!(ecproj_comp_size(b, Some("Square")), Some((1080, 1080)));
+        let c = br#"{"comps":{"Main":{"width":960,"height":540,"layers":[]}}}"#;
+        assert_eq!(ecproj_comp_size(c, Some("Main")), Some((960, 540)));
     }
 
     #[test]

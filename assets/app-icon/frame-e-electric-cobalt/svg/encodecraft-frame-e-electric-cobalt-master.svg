@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs><clipPath id="t"><rect width="1024" height="1024" rx="224"/></clipPath>
+<pattern id="hatch" patternUnits="userSpaceOnUse" width="14" height="14" patternTransform="rotate(45)">
+<rect width="14" height="14" fill="#EFE9DC"/><rect width="6" height="14" fill="#0B0B0C"/></pattern></defs>
+<g clip-path="url(#t)"><rect width="1024" height="1024" fill="#2448F5"/>
+<path d="M260.57,236 L683.43,236 L683.43,356 L380.57,356 L380.57,708 L683.43,708 L683.43,828 L260.57,828 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M220.57,196 L643.43,196 L683.43,236 L260.57,236 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M643.43,196 L643.43,316 L683.43,356 L683.43,236 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M643.43,316 L340.57,316 L380.57,356 L683.43,356 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M340.57,316 L340.57,668 L380.57,708 L380.57,356 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M340.57,668 L643.43,668 L683.43,708 L380.57,708 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M643.43,668 L643.43,788 L683.43,828 L683.43,708 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M643.43,788 L220.57,788 L260.57,828 L683.43,828 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M220.57,788 L220.57,196 L260.57,236 L260.57,828 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M404.57,472 L727.43,472 L787.43,532 L727.43,592 L404.57,592 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M364.57,432 L687.43,432 L727.43,472 L404.57,472 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M687.43,432 L747.43,492 L787.43,532 L727.43,472 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M747.43,492 L687.43,552 L727.43,592 L787.43,532 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M687.43,552 L364.57,552 L404.57,592 L727.43,592 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M364.57,552 L364.57,432 L404.57,472 L404.57,592 Z" fill="url(#hatch)" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M220.57,196 L643.43,196 L643.43,316 L340.57,316 L340.57,668 L643.43,668 L643.43,788 L220.57,788 Z" fill="#EFE9DC" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+<path d="M364.57,432 L687.43,432 L747.43,492 L687.43,552 L364.57,552 Z" fill="#EFE9DC" fill-rule="evenodd" stroke="#0B0B0C" stroke-width="12" stroke-linejoin="round"/>
+</g></svg>

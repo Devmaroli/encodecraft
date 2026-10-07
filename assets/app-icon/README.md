@@ -1,19 +1,12 @@
-# App icon (swap in)
+# App icon
 
-**Format E** (isometric `E` on a rounded square) is the approved shape. Colour is
-still being chosen, so it is **not** compiled into the Windows exe yet.
-
-The teal candidate lives in [`format-e/`](format-e/) (`.ico`, PNGs 16–1024, SVG
-masters). Do not copy those files to the names below until the final colour
-arrives.
-
-To embed, drop the chosen colour here and rebuild:
+Live drop-in (compiled into the Windows exes and the egui window):
 
 | file | used for |
 | --- | --- |
-| `encodecraft.ico` | Windows `encodecraft.exe` and `encodecraft-cli.exe` (Explorer, shortcuts, taskbar) |
-| `encodecraft-256.png` | egui/eframe window icon (title bar / taskbar). `encodecraft-64.png` is used if 256 is missing. |
+| `encodecraft.ico` | Windows `encodecraft.exe` and `encodecraft-cli.exe` |
+| `encodecraft-256.png` | Window / taskbar icon (`encodecraft-64.png` is a fallback) |
 
-`apps/encodecraft/build.rs`, `apps/encodecraft-cli/build.rs`, and
-`crates/ui-egui/build.rs` pick those two filenames up automatically. If they are
-absent, the build stays icon-less.
+Current artwork: **Frame E, Electric Cobalt** (`#2448F5` field, `#EFE9DC` paper, `#0B0B0C` ink) in [`frame-e-electric-cobalt/`](frame-e-electric-cobalt/).
+
+The teal Format E pack in [`format-e/`](format-e/) is superseded and is not embedded.

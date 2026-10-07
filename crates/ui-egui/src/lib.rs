@@ -1223,8 +1223,14 @@ pub fn run(handle: Handle) -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn window_stays_iconless_until_assets_are_dropped_in() {
-        assert!(super::window_icon().is_none(), "assets/app-icon PNG is optional; do not embed colour until the user sends the final files");
+    fn window_uses_frame_e_cobalt_icon() {
+        let icon = super::window_icon();
+        assert!(icon.is_some(), "encodecraft-256.png must be embedded as the window icon");
+        if let Some(icon) = icon {
+            assert_eq!(icon.width, 256);
+            assert_eq!(icon.height, 256);
+            assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        }
         let _ = super::native_options();
     }
 }

@@ -42,7 +42,7 @@ A ready-to-run 64-bit zip (`encodecraft-*-windows-x64.zip`) ships `encodecraft.e
 
 To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
 
-The Windows `.exe` icon is a drop-in: put `encodecraft.ico` and `encodecraft-256.png` in [`assets/app-icon/`](assets/app-icon/). Format E (approved shape) is stored under `assets/app-icon/format-e/` but is not embedded until a colour is chosen.
+The Windows `.exe` and window icon is **Frame E in Electric Cobalt** (`assets/app-icon/encodecraft.ico` and `encodecraft-256.png`). Source pack: [`assets/app-icon/frame-e-electric-cobalt/`](assets/app-icon/frame-e-electric-cobalt/).
 
 ### FFmpeg on Windows (if you are compiling yourself)
 

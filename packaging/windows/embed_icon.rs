@@ -16,7 +16,5 @@ fn main() {
     res.set_icon(path);
     res.set("ProductName", "EncodeCraft");
     res.set("FileDescription", "EncodeCraft");
-    if let Err(e) = res.compile() {
-        println!("cargo:warning=could not embed {path}: {e}");
-    }
+    res.compile().unwrap_or_else(|e| panic!("could not embed Windows app icon {path}: {e}"));
 }

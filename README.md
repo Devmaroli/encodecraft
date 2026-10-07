@@ -96,7 +96,7 @@ Tests:
 cargo test --workspace
 ```
 
-Data dir (queue / presets / inbox): `%APPDATA%\EncodeCraft\EncodeCraft` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. Override with `ENCODECRAFT_HOME`.
+Data dir (queue / presets / inbox / `ipc-token`): `%APPDATA%\EncodeCraft\EncodeCraft\data` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. Override with `ENCODECRAFT_HOME`.
 
 ## EffectCraft
 

@@ -121,7 +121,7 @@ Then:
 +    #[cfg(target_os = "windows")]
 +    {
 +        let base = std::env::var_os("APPDATA")?;
-+        return Some(PathBuf::from(base).join("EncodeCraft").join("EncodeCraft").join("inbox"));
++        return Some(PathBuf::from(base).join("EncodeCraft").join("EncodeCraft").join("data").join("inbox"));
 +    }
 +    #[cfg(target_os = "macos")]
 +    {

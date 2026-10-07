@@ -14,7 +14,7 @@ mod probe;
 mod progress;
 mod run;
 
-pub use command::{argv_path, build_encode_plan, even, EncodePlan, PlanInput};
+pub use command::{argv_path, build_encode_plan, even, sequence_pattern, EncodePlan, PlanInput};
 pub use detect::{find_effectcraft_cli, find_ffmpeg, find_ffmpeg_at, sidecar_ffmpeg, Ffmpeg};
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use progress::{parse_progress_line, EncodeProgress};

@@ -1,7 +1,7 @@
 # EncodeCraft job format
 
 `encodecraft-job` is a tiny crate (serde + thiserror) that EffectCraft can depend on without
-pulling FFmpeg or egui. Schema version **1**.
+pulling FFmpeg or egui. Schema version **1**, also accepted as the string `"encodecraft.job/v1"`.
 
 Default control port: **9878** on `127.0.0.1` (EffectCraft's control channel is 9877).
 
@@ -18,10 +18,19 @@ GET  /v1/queue        → current jobs                         (token required)
 POST /v1/control      → {"id":1,"method":"queue.start","params":{}}
 ```
 
-The token is created on first launch in the data dir as `ipc-token` (or `ENCODECRAFT_TOKEN`).
-`encodecraft-cli` and the EffectCraft handoff send it automatically. Browser `Origin` /
-cross-site `Sec-Fetch-Site` requests are rejected. There is no CORS header; bind is
-`127.0.0.1` only.
+The token is created on first launch as `ipc-token` inside the **ProjectDirs data dir**
+(or `ENCODECRAFT_TOKEN`):
+
+| OS | Token file |
+|----|------------|
+| Windows | `%APPDATA%\EncodeCraft\EncodeCraft\data\ipc-token` |
+| macOS | `~/Library/Application Support/dev.EncodeCraft.EncodeCraft/ipc-token` |
+| Linux | `$XDG_DATA_HOME/encodecraft/ipc-token` or `~/.local/share/encodecraft/ipc-token` |
+
+`encodecraft_job::discover_ipc_token()` searches those paths (and a short fallback list that
+includes the older Windows folder **without** `\data`). Extra JSON fields such as
+`source_version` are ignored. Browser `Origin` / cross-site `Sec-Fetch-Site` requests are
+rejected. There is no CORS header; bind is `127.0.0.1` only.
 
 JSON-lines on the same port (EffectCraft-style): one `{ "id", "method", "params", "token" }` per line.
 
@@ -30,6 +39,9 @@ subfolder of it. Naming tokens cannot escape that folder. Existing files are not
 unless Settings ▸ allow overwrite is on (otherwise `-2`, `-3`, … is appended).
 
 ## Enqueue body
+
+`schema` may be the integer `1` **or** the string `"encodecraft.job/v1"` (EffectCraft 0.4).
+Unknown schema values return HTTP 400 with a readable error.
 
 ```json
 {
@@ -61,7 +73,8 @@ split After Effects / Media Encoder uses.
 
 ```json
 {
-  "schema": 1,
+  "schema": "encodecraft.job/v1",
+  "source_version": 1,
   "source": {
     "kind": "effectcraft",
     "project": "/work/spot.ecproj",
@@ -95,5 +108,5 @@ split After Effects / Media Encoder uses.
 ## Inbox fallback
 
 If nothing is listening, `encodecraft-cli enqueue` writes
-`$ENCODECRAFT_HOME/inbox/<timestamp>.json` (default platform data dir). The app drains that
-folder on start and every 750 ms.
+`$ENCODECRAFT_HOME/inbox/<timestamp>.json` (default: the ProjectDirs data dir above, plus
+`/inbox`). The app drains that folder on start and every 750 ms.

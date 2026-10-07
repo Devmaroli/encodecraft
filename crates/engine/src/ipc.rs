@@ -199,10 +199,21 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
     } else if method == "POST" && (path == "/v1/enqueue" || path == "/enqueue") {
         match EnqueueRequest::from_json(&body) {
             Ok(req) => match handle.enqueue(req) {
-                Ok(ids) => (200, serde_json::to_string(&EnqueueReply { ok: true, ids, error: None }).unwrap_or_else(|_| "{}".into())),
-                Err(e) => (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(e.to_string()) }).unwrap_or_else(|_| "{}".into())),
+                Ok(ids) => {
+                    handle.lock(|s| s.push_log(format!("Queued {} job(s) from EffectCraft / HTTP", ids.len())));
+                    (200, serde_json::to_string(&EnqueueReply { ok: true, ids, error: None }).unwrap_or_else(|_| "{}".into()))
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    handle.lock(|s| s.push_log(format!("Enqueue rejected (HTTP 400): {msg}")));
+                    (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg) }).unwrap_or_else(|_| "{}".into()))
+                }
             },
-            Err(e) => (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(e.to_string()) }).unwrap_or_else(|_| "{}".into())),
+            Err(e) => {
+                let msg = e.to_string();
+                handle.lock(|s| s.push_log(format!("Enqueue rejected (HTTP 400): {msg}")));
+                (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg) }).unwrap_or_else(|_| "{}".into()))
+            }
         }
     } else if method == "POST" && (path == "/v1/control" || path == "/control") {
         match serde_json::from_slice::<ControlRequest>(&body) {
@@ -444,5 +455,37 @@ mod tests {
             ),
         );
         assert!(resp.contains("schema") || resp.contains("400"));
+        assert!(!resp.contains("invalid type"));
+    }
+
+    #[test]
+    fn accepts_effectcraft_schema_string_over_http_and_logs_failures() {
+        let (h, srv, tok, _guard) = boot();
+        let body = r#"{"schema":"encodecraft.job/v1","source_version":1,"source":{"kind":"effectcraft","project":"C:\\work\\spot.ecproj","comp":"Main"},"preset_id":"system.h264-mp4","start_queue":true}"#;
+        let resp = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(resp.contains("200") || resp.contains("\"ok\":true"), "{resp}");
+        let n = h.lock(|s| s.queue.jobs.len());
+        assert_eq!(n, 1);
+
+        let bad = r#"{"schema":"encodecraft.job/v9","source":{"kind":"file","path":"a.mp4"},"preset_id":"x"}"#;
+        let resp = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bad}",
+                bad.len()
+            ),
+        );
+        assert!(resp.contains("400"));
+        assert!(!resp.contains("invalid type"));
+        assert!(resp.contains("encodecraft.job/v9") || resp.contains("unknown job schema"));
+        let log = h.lock(|s| s.log.join("\n"));
+        assert!(log.contains("HTTP 400"), "{log}");
+        assert!(log.contains("schema") || log.contains("encodecraft.job"), "{log}");
     }
 }

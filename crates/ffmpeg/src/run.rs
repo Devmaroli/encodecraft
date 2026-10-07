@@ -50,7 +50,7 @@ pub fn encode(
     on_progress: impl FnMut(&EncodeProgress),
     on_log: impl FnMut(&str),
 ) -> Result<EncodeResult, FfmpegError> {
-    encode_with_stall(ff, source, output, preset, trim, media, stop, DEFAULT_STALL_SECS, on_progress, on_log)
+    encode_with_stall(ff, source, output, preset, trim, media, None, stop, DEFAULT_STALL_SECS, on_progress, on_log)
 }
 
 pub fn encode_with_stall(
@@ -60,6 +60,7 @@ pub fn encode_with_stall(
     preset: &ExportPreset,
     trim: Trim,
     media: Option<&MediaInfo>,
+    sequence_start: Option<u32>,
     stop: &EncodeStop,
     stall_secs: u64,
     mut on_progress: impl FnMut(&EncodeProgress),
@@ -73,7 +74,7 @@ pub fn encode_with_stall(
     if let Some(parent) = tmp_out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let plan = build_encode_plan(PlanInput { source, output: tmp_out.clone(), preset, trim, media });
+    let plan = build_encode_plan(PlanInput { source, output: tmp_out.clone(), preset, trim, media, sequence_start });
     on_log(&plan.display_cmdline(&ff.ffmpeg));
 
     let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));

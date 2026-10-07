@@ -4,6 +4,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod drops;
 mod fsutil;
 mod ipc;
 mod paths;
@@ -12,6 +13,7 @@ mod token;
 mod watch;
 mod worker;
 
+pub use drops::{classify_dropped_paths, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop};
 pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, set_home};
 pub use persist::Settings;
@@ -24,7 +26,7 @@ use std::thread;
 use std::time::Duration;
 
 use encodecraft_ffmpeg::{find_ffmpeg_at, probe, thumbnail_png, EncodeStop, Ffmpeg, FfmpegError};
-use encodecraft_job::{ControlReply, ControlRequest, EnqueueRequest};
+use encodecraft_job::{ControlReply, ControlRequest, EnqueueRequest, JobSource};
 use encodecraft_presets::{default_output_dir, default_template, ExportPreset, PresetLibrary};
 use encodecraft_queue::{EncodeQueue, Job, JobStatus, QueueError};
 use serde_json::{json, Value};
@@ -255,19 +257,51 @@ impl Session {
     pub fn add_files(&mut self, paths: &[PathBuf], preset_id: &str) -> Result<Vec<String>, EngineError> {
         let mut ids = Vec::new();
         for p in paths {
-            let req = EnqueueRequest {
-                schema: 1,
-                source: encodecraft_job::JobSource::file(p.clone()),
-                preset_id: preset_id.to_string(),
-                preset_override: None,
-                output_dir: Some(self.settings.output_dir.clone()),
-                naming: Some(self.settings.naming.clone()),
-                sizes: Vec::new(),
-                trim: None,
-                scale: None,
-                start_queue: false,
-            };
-            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?);
+            ids.extend(self.enqueue_user_source(JobSource::file(p.clone()), preset_id)?);
+        }
+        if let Some(last) = ids.last() {
+            self.selected = Some(last.clone());
+        }
+        Ok(ids)
+    }
+
+    /// User-initiated add (picker / drag-and-drop). Output stays in Settings ▸ output folder.
+    pub fn enqueue_user_source(&mut self, source: JobSource, preset_id: &str) -> Result<Vec<String>, EngineError> {
+        let req = EnqueueRequest {
+            schema: 1,
+            source,
+            preset_id: preset_id.to_string(),
+            preset_override: None,
+            output_dir: Some(self.settings.output_dir.clone()),
+            naming: Some(self.settings.naming.clone()),
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false).map_err(Into::into)
+    }
+
+    pub fn add_drop_outcome(&mut self, outcome: &DropOutcome, preset_id: &str) -> Result<Vec<String>, EngineError> {
+        let mut ids = Vec::new();
+        for p in &outcome.media {
+            ids.extend(self.enqueue_user_source(JobSource::file(p.clone()), preset_id)?);
+        }
+        for seq in &outcome.sequences {
+            ids.extend(self.enqueue_user_source(JobSource::image_sequence(seq.first_frame.clone(), seq.start), preset_id)?);
+        }
+        if let Some(last) = ids.last() {
+            self.selected = Some(last.clone());
+        }
+        Ok(ids)
+    }
+
+    pub fn add_effectcraft_comps(&mut self, project: PathBuf, comps: &[String], preset_id: &str) -> Result<Vec<String>, EngineError> {
+        let chosen: Vec<Option<String>> = if comps.is_empty() { vec![None] } else { comps.iter().cloned().map(Some).collect() };
+        let mut ids = Vec::new();
+        for comp in chosen {
+            let source = JobSource::EffectCraft { project: project.clone(), comp, mezzanine: "prores".into(), work_area: false };
+            ids.extend(self.enqueue_user_source(source, preset_id)?);
         }
         if let Some(last) = ids.last() {
             self.selected = Some(last.clone());
@@ -298,15 +332,15 @@ impl Session {
     pub fn probe_job(&self, job: &Job) -> Option<encodecraft_ffmpeg::MediaInfo> {
         let ff = self.ffmpeg.as_ref().ok()?;
         match &job.source {
-            encodecraft_job::JobSource::File { path } => probe(ff, path).ok(),
-            encodecraft_job::JobSource::EffectCraft { .. } => None,
+            JobSource::File { path, .. } => probe(ff, path).ok(),
+            JobSource::EffectCraft { .. } => None,
         }
     }
 
     pub fn thumbnail(&self, job: &Job) -> Option<PathBuf> {
         let ff = self.ffmpeg.as_ref().ok()?;
         let src = match &job.source {
-            encodecraft_job::JobSource::File { path } => path,
+            JobSource::File { path, .. } => path,
             _ => return None,
         };
         let dest = paths::thumbs_dir().join(format!("{}.jpg", job.id));
@@ -503,5 +537,44 @@ mod tests {
         assert!(p.exists());
         let back = EnqueueRequest::from_json(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!(back.preset_id, "system.gif");
+    }
+
+    #[test]
+    fn drop_effectcraft_jobs_use_comp_names_and_stay_in_output_dir() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        let out = home.join("exports");
+        std::fs::create_dir_all(&out).unwrap();
+        h.lock(|s| s.settings.output_dir = out.clone());
+        let project = home.join("spot.ecproj");
+        std::fs::write(&project, br#"{"compositions":[{"name":"Main"}]}"#).unwrap();
+        let ids = h.lock(|s| s.add_effectcraft_comps(project.clone(), &["Main".into(), "Lower".into()], "system.h264-mp4")).unwrap();
+        assert_eq!(ids.len(), 2);
+        h.lock(|s| {
+            assert!(matches!(&s.queue.jobs[0].source, JobSource::EffectCraft { comp: Some(c), .. } if c == "Main"));
+            assert!(matches!(&s.queue.jobs[1].source, JobSource::EffectCraft { comp: Some(c), .. } if c == "Lower"));
+            for j in &s.queue.jobs {
+                assert!(j.output.starts_with(&out), "{}", j.output.display());
+            }
+        });
+    }
+
+    #[test]
+    fn drop_sequence_enqueues_one_job() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        h.lock(|s| s.settings.output_dir = home.join("out"));
+        let seq = SequenceDrop { first_frame: home.join("shot_0001.png"), start: 1, frames: 3 };
+        let outcome = DropOutcome { sequences: vec![seq], ..DropOutcome::default() };
+        let ids = h.lock(|s| s.add_drop_outcome(&outcome, "system.h264-mp4")).unwrap();
+        assert_eq!(ids.len(), 1);
+        h.lock(|s| match &s.queue.jobs[0].source {
+            JobSource::File { sequence_start, .. } => assert_eq!(*sequence_start, Some(1)),
+            JobSource::EffectCraft { .. } => panic!("expected file sequence"),
+        });
     }
 }

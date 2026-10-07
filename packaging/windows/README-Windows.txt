@@ -30,7 +30,8 @@ tick Unblock → Apply → OK, then double-click again.
 
 How to use it
 -------------
-  • Drag video files onto the window, or click  + Add.
+  • Drag video, audio, image sequences, or an EffectCraft .ecproj onto the window,
+    or click  + Add. Dropping a .ecproj lets you pick which comps to queue.
   • Pick a preset on the right (H.264 is a good default).
   • For several screen sizes from one file (for example 1920×1080 and 1080×1920),
     click  One → many sizes.

@@ -7,11 +7,9 @@ use encodecraft_job::{EnqueueRequest, JobSource, ScreenSize};
 use encodecraft_presets::is_under;
 use serde::{Deserialize, Serialize};
 
+use crate::drops::is_media_path;
 use crate::fsutil;
 use crate::Handle;
-
-const VIDEO_EXT: &[&str] =
-    &["mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m4v", "mpg", "mpeg", "wmv", "gif", "png", "jpg", "jpeg", "wav", "mp3", "aac", "m4a", "aif", "aiff"];
 
 /// Skip absurd files (likely a copy error or a zip bomb dropped on the folder).
 const MAX_WATCH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -151,8 +149,7 @@ fn walk(dir: &Path, recursive: bool, depth: u32, out: &mut Vec<PathBuf>) {
             }
             continue;
         }
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if VIDEO_EXT.iter().any(|x| *x == ext) {
+        if is_media_path(&p) {
             out.push(p);
         }
     }

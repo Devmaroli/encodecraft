@@ -42,6 +42,8 @@ pub struct PlanInput<'a> {
     pub preset: &'a ExportPreset,
     pub trim: Trim,
     pub media: Option<&'a MediaInfo>,
+    /// First-frame number when `source` is a numbered still sequence.
+    pub sequence_start: Option<u32>,
 }
 
 pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
@@ -52,8 +54,22 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
         args.push("-ss".into());
         args.push(format_secs(input.trim.in_sec));
     }
+    let mut input_path = input.source.to_path_buf();
+    if let Some(start) = input.sequence_start {
+        if let Some((pattern, _, _)) = sequence_pattern(input.source) {
+            args.push("-framerate".into());
+            let fps = match input.preset.video.frame_rate {
+                FrameRate::Custom(f) if f > 0.0 => f,
+                _ => 30.0,
+            };
+            args.push(format!("{fps}"));
+            args.push("-start_number".into());
+            args.push(start.to_string());
+            input_path = pattern;
+        }
+    }
     args.push("-i".into());
-    args.push(argv_path(input.source));
+    args.push(argv_path(&input_path));
     if let Some(dur) = input.trim.duration_sec(input.media.and_then(|m| m.duration_sec)) {
         args.push("-t".into());
         args.push(format_secs(dur));
@@ -241,6 +257,32 @@ fn format_secs(s: f64) -> String {
     format!("{s:.3}")
 }
 
+/// `hero_0001.png` → (`hero_%04d.png`, start 1, width 4).
+pub fn sequence_pattern(first_frame: &Path) -> Option<(PathBuf, u32, usize)> {
+    let name = first_frame.file_name()?.to_str()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    let bytes = stem.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == 0 || i == bytes.len() {
+        return None;
+    }
+    let width = bytes.len() - i;
+    if !(1..=8).contains(&width) {
+        return None;
+    }
+    let num: u32 = stem[i..].parse().ok()?;
+    let prefix = &stem[..i];
+    let pattern_name = format!("{prefix}%0{width}d.{ext}");
+    let path = match first_frame.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(pattern_name),
+        _ => PathBuf::from(pattern_name),
+    };
+    Some((path, num, width))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +300,7 @@ mod tests {
             preset: &p,
             trim: Trim { in_sec: 1.5, out_sec: Some(9.0) },
             media: None,
+            sequence_start: None,
         })
     }
 
@@ -332,6 +375,7 @@ mod tests {
             preset: &p,
             trim: Trim::default(),
             media: None,
+            sequence_start: None,
         });
         assert!(join(&plan).contains("frame_%06d.png"));
         assert!(join(&plan).contains("-c:v png"));
@@ -350,7 +394,14 @@ mod tests {
         let mut p = lib.get("system.h264-mp4").unwrap();
         p.video = VideoSettings { quality: Quality::bitrate(5000), width: Some(1920), height: Some(1080), ..p.video };
         let plan =
-            build_encode_plan(PlanInput { source: Path::new("in.mp4"), output: PathBuf::from("out.mp4"), preset: &p, trim: Trim::default(), media: None });
+            build_encode_plan(PlanInput {
+                source: Path::new("in.mp4"),
+                output: PathBuf::from("out.mp4"),
+                preset: &p,
+                trim: Trim::default(),
+                media: None,
+                sequence_start: None,
+            });
         assert!(join(&plan).contains("-b:v 5000k"));
         assert!(!join(&plan).contains("-crf"));
     }
@@ -373,9 +424,32 @@ mod tests {
             preset: &preset,
             trim: Trim::default(),
             media: None,
+            sequence_start: None,
         });
         let i = plan.args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(plan.args[i + 1], "./-evil.mov");
         assert_eq!(plan.args.last().unwrap(), "./-out.mp4");
+    }
+
+    #[test]
+    fn image_sequence_uses_pattern_and_start_number() {
+        let lib = PresetLibrary::new();
+        let preset = lib.get("system.h264-mp4").unwrap();
+        let plan = build_encode_plan(PlanInput {
+            source: Path::new("/seq/hero_0007.png"),
+            output: PathBuf::from("/out/hero.mp4"),
+            preset: &preset,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: Some(7),
+        });
+        let s = join(&plan);
+        assert!(s.contains("-framerate"));
+        assert!(s.contains("-start_number 7"));
+        assert!(s.contains("hero_%04d.png"));
+        let i = plan.args.iter().position(|a| a == "-i").unwrap();
+        assert!(plan.args[i + 1].contains("hero_%04d.png"));
+        assert!(sequence_pattern(Path::new("hero_0001.png")).is_some());
+        assert!(sequence_pattern(Path::new("hero.mp4")).is_none());
     }
 }

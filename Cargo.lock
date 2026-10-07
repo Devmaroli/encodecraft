@@ -905,7 +905,6 @@ dependencies = [
 name = "encodecraft-engine"
 version = "0.1.0"
 dependencies = [
- "directories",
  "encodecraft-ffmpeg",
  "encodecraft-job",
  "encodecraft-presets",

@@ -100,6 +100,10 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let h_prog = h.clone();
     let h_log = h.clone();
     let stall = h.lock(|s| s.settings.stall_timeout_sec).max(15);
+    let sequence_start = match &job.source {
+        JobSource::File { sequence_start, .. } => *sequence_start,
+        JobSource::EffectCraft { .. } => None,
+    };
     encode_with_stall(
         &ff,
         &source_file,
@@ -107,6 +111,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         &job.preset,
         job.trim,
         media.as_ref(),
+        sequence_start,
         &stop,
         stall,
         |p| {
@@ -136,7 +141,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
 
 fn resolve_source(h: &Handle, job: &encodecraft_queue::Job, stop: &EncodeStop) -> Result<PathBuf, crate::EngineError> {
     match &job.source {
-        JobSource::File { path } => {
+        JobSource::File { path, .. } => {
             if fsutil::is_symlink(path) {
                 return Err(crate::EngineError::Message("refusing to encode a symlink source".into()));
             }

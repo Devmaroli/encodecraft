@@ -49,9 +49,15 @@ Behaviour:
 3. Build `EnqueueRequest` with `JobSource::EffectCraft { project, comp, mezzanine: "prores", work_area }`.
 4. Optionally copy current Render Settings size overrides into `sizes` (DOOH pack).
 5. `POST http://127.0.0.1:9878/v1/enqueue` with `Host: 127.0.0.1`, `Content-Type: application/json`,
-   and `X-EncodeCraft-Token` from `encodecraft_job::discover_ipc_token()` (the `ipc-token` file
-   in EncodeCraft's data dir). If that fails, write the JSON to EncodeCraft's inbox
-   (see `docs/job-format.md`) and try to spawn `encodecraft`.
+   and `X-EncodeCraft-Token` from `encodecraft_job::discover_ipc_token()`. That reads
+   `ipc-token` from EncodeCraft's **ProjectDirs data dir**:
+   - Windows: `%APPDATA%\EncodeCraft\EncodeCraft\data\ipc-token`
+   - macOS: `~/Library/Application Support/dev.EncodeCraft.EncodeCraft/ipc-token`
+   - Linux: `~/.local/share/encodecraft/ipc-token`
+   Older snippets omitted `\data` on Windows; `discover_ipc_token()` still checks that folder.
+   If POST fails, write the JSON to EncodeCraft's inbox (`…/data/inbox` on Windows;
+   see `docs/job-format.md`) and try to spawn `encodecraft`.
+   `schema` may be `1` or `"encodecraft.job/v1"`. Extra fields (`source_version`) are ignored.
 
 ## 3. CLI without patching the UI
 
@@ -76,7 +82,9 @@ encodecraft-cli serve --port 9878 --start
 ## 4. curl smoke test
 
 ```sh
+# Linux/macOS:
 TOKEN=$(cat "${ENCODECRAFT_HOME:-$HOME/.local/share/encodecraft}/ipc-token")
+# Windows (PowerShell): $env:APPDATA\EncodeCraft\EncodeCraft\data\ipc-token
 curl -sS -X POST http://127.0.0.1:9878/v1/enqueue \
   -H 'Content-Type: application/json' \
   -H "X-EncodeCraft-Token: $TOKEN" \

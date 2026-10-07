@@ -6,9 +6,10 @@ mod theme;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use egui::{Color32, RichText, Sense, Ui, Vec2};
-use encodecraft_engine::Handle;
+use egui::{Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, DropOutcome, Handle};
 use encodecraft_job::{ScaleMode, ScreenSize, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, Quality};
 use encodecraft_queue::{Job, JobStatus};
@@ -30,6 +31,16 @@ pub struct EncodeApp {
     thumb_tex: HashMap<String, egui::TextureHandle>,
     status: String,
     last_persist: std::time::Instant,
+    drop_notice: Option<(String, Instant)>,
+    ecproj_picker: Option<EcprojPicker>,
+}
+
+struct EcprojPicker {
+    path: PathBuf,
+    comps: Vec<String>,
+    selected: Vec<bool>,
+    custom: String,
+    parse_note: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,6 +68,8 @@ impl EncodeApp {
             thumb_tex: HashMap::new(),
             status: String::new(),
             last_persist: std::time::Instant::now(),
+            drop_notice: None,
+            ecproj_picker: None,
         }
     }
 
@@ -71,6 +84,7 @@ impl eframe::App for EncodeApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
         self.ingest_drops(ctx);
+        self.drop_overlay(ctx);
         if self.last_persist.elapsed() > std::time::Duration::from_secs(4) {
             self.handle.persist();
             self.last_persist = std::time::Instant::now();
@@ -95,6 +109,7 @@ impl eframe::App for EncodeApp {
             ui.separator();
             ui.allocate_ui(Vec2::new(avail.x, bottom_h), |ui| self.bottom(ui));
         });
+        self.drop_notice_banner(ctx);
         self.ffmpeg_banner(ctx);
         self.dialogs(ctx);
     }
@@ -107,13 +122,112 @@ impl eframe::App for EncodeApp {
 
 impl EncodeApp {
     fn ingest_drops(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
-        if dropped.is_empty() {
+        let (paths, nameless) = ctx.input(|i| {
+            let mut paths = Vec::new();
+            let mut nameless = 0usize;
+            for f in &i.raw.dropped_files {
+                match &f.path {
+                    Some(p) => paths.push(p.clone()),
+                    None => nameless += 1,
+                }
+            }
+            (paths, nameless)
+        });
+        if paths.is_empty() && nameless == 0 {
             return;
         }
+        if paths.is_empty() {
+            self.set_drop_notice("That drop had no file path. Save the EffectCraft project and drop the .ecproj from Explorer, or drop media files.");
+            return;
+        }
+        let outcome = classify_dropped_paths(&paths);
+        self.apply_drop_outcome(outcome, nameless);
+    }
+
+    fn apply_drop_outcome(&mut self, outcome: DropOutcome, nameless: usize) {
         let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
-        let _ = self.handle.lock(|s| s.add_files(&dropped, &preset));
-        self.status = format!("Added {} source(s)", dropped.len());
+        let mut bits = Vec::new();
+        if !outcome.media.is_empty() || !outcome.sequences.is_empty() {
+            match self.handle.lock(|s| s.add_drop_outcome(&outcome, &preset)) {
+                Ok(ids) => bits.push(format!("Queued {} media item(s)", ids.len())),
+                Err(e) => self.set_drop_notice(format!("Could not queue dropped media: {e}")),
+            }
+        }
+        if let Some(msg) = outcome.unsupported_message() {
+            self.set_drop_notice(msg);
+        } else if nameless > 0 {
+            self.set_drop_notice("Some dropped items had no file path and were skipped.");
+        }
+        if !outcome.projects.is_empty() {
+            self.open_ecproj_picker(outcome.projects);
+        }
+        if !bits.is_empty() {
+            self.status = bits.join(" · ");
+        }
+    }
+
+    fn open_ecproj_picker(&mut self, projects: Vec<PathBuf>) {
+        let Some(path) = projects.into_iter().next() else {
+            return;
+        };
+        let (comps, parse_note) = match list_ecproj_compositions_file(&path) {
+            Ok(c) if c.is_empty() => (Vec::new(), Some("Could not list compositions in this project. Queue with EffectCraft’s default/first comp, or type a name.".into())),
+            Ok(c) => (c, None),
+            Err(e) => (Vec::new(), Some(format!("Could not read project ({e}). Queue with the default composition, or type a name."))),
+        };
+        let selected = if comps.is_empty() { Vec::new() } else { vec![true; comps.len()] };
+        self.ecproj_picker = Some(EcprojPicker { path, comps, selected, custom: String::new(), parse_note });
+    }
+
+    fn set_drop_notice(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.status = msg.clone();
+        self.drop_notice = Some((msg, Instant::now()));
+    }
+
+    fn drop_overlay(&self, ctx: &egui::Context) {
+        let hovered = ctx.input(|i| i.raw.hovered_files.clone());
+        if hovered.is_empty() {
+            return;
+        }
+        let has_ecproj = hovered.iter().any(|f| f.path.as_ref().is_some_and(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ecproj"))));
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-overlay")));
+        let fill = Color32::from_rgba_unmultiplied(45, 140, 235, 42);
+        painter.rect_filled(screen, CornerRadius::ZERO, fill);
+        painter.rect_stroke(
+            screen.shrink(10.0),
+            CornerRadius::same(10),
+            Stroke::new(3.0_f32, Color32::from_rgb(0x2d, 0x8c, 0xeb)),
+            StrokeKind::Inside,
+        );
+        let label = if has_ecproj {
+            "Drop EffectCraft project to pick compositions"
+        } else {
+            "Drop media to add to the queue"
+        };
+        let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(22.0), Color32::WHITE);
+        let pos = screen.center() - galley.size() * 0.5;
+        painter.galley(pos, galley, Color32::WHITE);
+        ctx.request_repaint();
+    }
+
+    fn drop_notice_banner(&mut self, ctx: &egui::Context) {
+        let Some((msg, at)) = self.drop_notice.clone() else {
+            return;
+        };
+        if at.elapsed() > Duration::from_secs(10) {
+            self.drop_notice = None;
+            return;
+        }
+        egui::TopBottomPanel::top("drop-notice").frame(egui::Frame::NONE.fill(Color32::from_rgb(72, 40, 20)).inner_margin(8.0)).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&msg).color(Color32::from_rgb(255, 220, 180)).size(13.0));
+                if ui.small_button("Dismiss").clicked() {
+                    self.drop_notice = None;
+                }
+            });
+        });
     }
 
     fn menu(&mut self, ctx: &egui::Context) {
@@ -251,7 +365,7 @@ impl EncodeApp {
             let (n, run) = self.handle.lock(|s| (s.queue.jobs.len(), s.queue.running));
             ui.label(RichText::new(format!("{n} item(s) · {}", if run { "running" } else { "idle" })).color(t.text_dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Drop media here").color(t.text_faint).italics().size(12.0));
+                ui.label(RichText::new("Drop media or .ecproj here").color(t.text_faint).italics().size(12.0));
             });
         });
         ui.add_space(4.0);
@@ -261,7 +375,7 @@ impl EncodeApp {
             ui.vertical_centered(|ui| {
                 ui.add_space(48.0);
                 ui.label(RichText::new("Queue is empty").size(16.0).color(t.text_dim));
-                ui.label(RichText::new("Add a source, drop files, or send a job from EffectCraft.").color(t.text_faint));
+                ui.label(RichText::new("Drop media from Explorer, drop an EffectCraft .ecproj to pick comps, or send a job from EffectCraft.").color(t.text_faint));
                 ui.add_space(8.0);
                 if ui.button("Add source…").clicked() {
                     self.pick_sources();
@@ -673,6 +787,74 @@ impl EncodeApp {
         if self.show_preset_edit {
             self.preset_edit_dialog(ctx);
         }
+        self.ecproj_dialog(ctx);
+    }
+
+    fn ecproj_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut picker) = self.ecproj_picker.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut queue = false;
+        let mut cancel = false;
+        let mut queued_ok = false;
+        let title = format!("Queue EffectCraft project — {}", picker.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| picker.path.display().to_string()));
+        egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(420.0).show(ctx, |ui| {
+            ui.label("Choose which composition(s) to send to the encode queue. EncodeCraft will render each with effectcraft-cli, then encode with the default preset.");
+            if let Some(note) = &picker.parse_note {
+                ui.label(RichText::new(note).color(self.t().warning).size(12.0));
+            }
+            if picker.comps.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("Composition name (optional)");
+                    ui.add(egui::TextEdit::singleline(&mut picker.custom).desired_width(220.0).hint_text("default / first"));
+                });
+            } else {
+                if ui.button("Select all").clicked() {
+                    for f in &mut picker.selected {
+                        *f = true;
+                    }
+                }
+                ui.add_space(4.0);
+                for (i, name) in picker.comps.iter().enumerate() {
+                    if let Some(flag) = picker.selected.get_mut(i) {
+                        ui.checkbox(flag, name);
+                    }
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Queue selected").clicked() {
+                    queue = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if queue {
+            let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
+            let comps: Vec<String> = if picker.comps.is_empty() {
+                let t = picker.custom.trim();
+                if t.is_empty() { Vec::new() } else { vec![t.to_string()] }
+            } else {
+                picker.comps.iter().enumerate().filter(|(i, _)| picker.selected.get(*i).copied().unwrap_or(false)).map(|(_, n)| n.clone()).collect()
+            };
+            if picker.comps.is_empty() || !comps.is_empty() {
+                match self.handle.lock(|s| s.add_effectcraft_comps(picker.path.clone(), &comps, &preset)) {
+                    Ok(ids) => {
+                        self.status = format!("Queued {} EffectCraft comp(s)", ids.len());
+                        queued_ok = true;
+                    }
+                    Err(e) => self.set_drop_notice(format!("Could not queue EffectCraft project: {e}")),
+                }
+            } else {
+                self.set_drop_notice("Select at least one composition, or Cancel.");
+            }
+        }
+        if open && !cancel && !queued_ok {
+            self.ecproj_picker = Some(picker);
+        }
     }
 
     fn watch_dialog(&mut self, ctx: &egui::Context) {
@@ -766,16 +948,13 @@ impl EncodeApp {
     fn pick_sources(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter("Media", &["mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m4v", "gif", "png", "jpg", "wav", "mp3", "aac", "m4a"])
+            .add_filter("EffectCraft project", &["ecproj"])
             .pick_files()
             .unwrap_or_default();
         if files.is_empty() {
             return;
         }
-        let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
-        match self.handle.lock(|s| s.add_files(&files, &preset)) {
-            Ok(ids) => self.status = format!("Added {} source(s)", ids.len()),
-            Err(e) => self.status = e.to_string(),
-        }
+        self.apply_drop_outcome(classify_dropped_paths(&files), 0);
     }
 
     fn import_preset(&mut self) {

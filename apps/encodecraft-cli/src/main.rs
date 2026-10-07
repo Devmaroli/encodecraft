@@ -144,7 +144,14 @@ fn print_cmd(args: &[String]) -> Result<(), String> {
     let lib = PresetLibrary::new();
     let preset = lib.get_or_parse(preset_id).map_err(|e| e.to_string())?;
     let dest = opt(args, "--out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("out.{}", preset.extension())));
-    let plan = build_encode_plan(PlanInput { source: Path::new(file), output: dest, preset: &preset, trim: encodecraft_job::Trim::default(), media: None });
+    let plan = build_encode_plan(PlanInput {
+        source: Path::new(file),
+        output: dest,
+        preset: &preset,
+        trim: encodecraft_job::Trim::default(),
+        media: None,
+        sequence_start: None,
+    });
     let ff = find_ffmpeg().map(|f| f.ffmpeg).unwrap_or_else(|_| PathBuf::from("ffmpeg"));
     println!("{}", plan.display_cmdline(&ff));
     Ok(())

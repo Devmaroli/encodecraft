@@ -30,7 +30,7 @@ pub fn data_dir() -> PathBuf {
     if let Ok(p) = std::env::var(HOME_ENV) {
         return PathBuf::from(p);
     }
-    directories::ProjectDirs::from("dev", "EncodeCraft", "EncodeCraft").map(|p| p.data_dir().to_path_buf()).unwrap_or_else(|| std::env::temp_dir().join(APP_ID))
+    encodecraft_job::canonical_data_dir().unwrap_or_else(|| std::env::temp_dir().join(APP_ID))
 }
 
 pub fn config_dir() -> PathBuf {

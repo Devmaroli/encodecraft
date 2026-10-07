@@ -104,7 +104,7 @@ fn inbox_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let base = std::env::var_os("APPDATA")?;
-        return Some(PathBuf::from(base).join("EncodeCraft").join("EncodeCraft").join("inbox"));
+        return Some(encodecraft_job::windows_inbox_dir(base));
     }
     #[cfg(target_os = "macos")]
     {

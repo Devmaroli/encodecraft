@@ -3,10 +3,17 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod naming;
+mod screen_rules;
 
 pub use naming::{
     apply_template, constrain_output_dir, default_template, is_under, normalize_path, output_path, sanitize_filename, unique_output_path, NamingContext,
 };
+pub use screen_rules::{
+    infer_screen_from_text, normalize_screen_name, PresetPick, PresetReason, ScreenMatchRule, ScreenPresetRules,
+};
+
+pub const BETTER_RES_ID: &str = "system.better-res";
+pub const INSTALLATION_ID: &str = "system.installation";
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -153,7 +160,7 @@ impl Default for FrameRate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "lowercase")]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum Quality {
     /// Constant rate factor / quality. Lower is better for x264/x265/VP9.
     Crf { value: u8 },
@@ -161,6 +168,9 @@ pub enum Quality {
     Bitrate { kbps: u32 },
     /// Encoder-specific quality 1–100 (used for JPEG / ProRes-ish).
     Quality { value: u8 },
+    /// libx264 VBR 2-pass. Numbers are Mbps so they stay easy to edit.
+    #[serde(rename = "vbr-2pass", alias = "vbr2pass", alias = "twopass", alias = "vbr-2-pass")]
+    Vbr2Pass { target_mbps: f64, max_mbps: f64 },
 }
 
 impl Quality {
@@ -170,6 +180,36 @@ impl Quality {
     pub fn bitrate(kbps: u32) -> Self {
         Quality::Bitrate { kbps }
     }
+    pub fn vbr_2pass(target_mbps: f64, max_mbps: f64) -> Self {
+        Quality::Vbr2Pass { target_mbps, max_mbps }
+    }
+
+    pub fn target_kbps(self) -> Option<u32> {
+        match self {
+            Quality::Bitrate { kbps } => Some(kbps.max(1)),
+            Quality::Vbr2Pass { target_mbps, .. } => Some(mbps_to_kbps(target_mbps)),
+            _ => None,
+        }
+    }
+
+    pub fn max_kbps(self) -> Option<u32> {
+        match self {
+            Quality::Vbr2Pass { max_mbps, target_mbps } => {
+                let t = mbps_to_kbps(target_mbps);
+                Some(mbps_to_kbps(max_mbps).max(t))
+            }
+            Quality::Bitrate { kbps } => Some(kbps.max(1)),
+            _ => None,
+        }
+    }
+}
+
+pub fn mbps_to_kbps(mbps: f64) -> u32 {
+    let v = (mbps * 1000.0).round();
+    if !v.is_finite() {
+        return 1;
+    }
+    v.clamp(1.0, 1_000_000.0) as u32
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,6 +228,12 @@ pub struct VideoSettings {
     /// ProRes profile: 0 Proxy … 5 4444 XQ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prores_profile: Option<u8>,
+    /// libx264 `-profile:v` (`high`, `main`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h264_profile: Option<String>,
+    /// libx264 `-level:v`. `auto` / omitted = pick from frame size (6.2 when any side > 4096).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h264_level: Option<String>,
 }
 
 fn default_quality() -> Quality {
@@ -196,7 +242,16 @@ fn default_quality() -> Quality {
 
 impl Default for VideoSettings {
     fn default() -> Self {
-        Self { width: None, height: None, frame_rate: FrameRate::Source, quality: Quality::crf(23), scale: ScaleMode::Fit, prores_profile: None }
+        Self {
+            width: None,
+            height: None,
+            frame_rate: FrameRate::Source,
+            quality: Quality::crf(23),
+            scale: ScaleMode::Fit,
+            prores_profile: None,
+            h264_profile: None,
+            h264_level: None,
+        }
     }
 }
 
@@ -272,23 +327,48 @@ fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
 }
 
 /// In-memory preset library: builtins (immutable) + user presets.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PresetLibrary {
     pub user: Vec<ExportPreset>,
     pub screens: Vec<ScreenSize>,
+    /// Saved edits to system studio presets (bitrate numbers, fps, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_overrides: Vec<ExportPreset>,
+    /// Automatic Better Res / Installation assignment. Editable in Settings.
+    #[serde(default)]
+    pub screen_rules: ScreenPresetRules,
+}
+
+impl Default for PresetLibrary {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PresetLibrary {
     pub fn new() -> Self {
-        Self { user: Vec::new(), screens: builtin_screens() }
+        Self { user: Vec::new(), screens: builtin_screens(), system_overrides: Vec::new(), screen_rules: ScreenPresetRules::default() }
     }
 
     pub fn builtins() -> Vec<ExportPreset> {
         builtin_presets()
     }
 
-    pub fn all(&self) -> Vec<ExportPreset> {
+    fn resolved_builtins(&self) -> Vec<ExportPreset> {
         let mut v = builtin_presets();
+        for over in &self.system_overrides {
+            if let Some(p) = v.iter_mut().find(|p| p.id == over.id) {
+                let mut o = over.clone();
+                o.kind = PresetKind::System;
+                o.id = p.id.clone();
+                *p = o;
+            }
+        }
+        v
+    }
+
+    pub fn all(&self) -> Vec<ExportPreset> {
+        let mut v = self.resolved_builtins();
         v.extend(self.user.iter().cloned());
         v
     }
@@ -326,6 +406,24 @@ impl PresetLibrary {
             self.user.push(preset);
         }
         Ok(())
+    }
+
+    /// Save a user preset, or persist bitrate/fps edits on the studio system presets.
+    pub fn save_preset(&mut self, mut preset: ExportPreset) -> Result<(), PresetError> {
+        if preset.id == BETTER_RES_ID || preset.id == INSTALLATION_ID {
+            preset.kind = PresetKind::System;
+            if let Some(existing) = self.system_overrides.iter_mut().find(|p| p.id == preset.id) {
+                *existing = preset;
+            } else {
+                self.system_overrides.push(preset);
+            }
+            return Ok(());
+        }
+        self.upsert_user(preset)
+    }
+
+    pub fn is_studio_system(id: &str) -> bool {
+        id == BETTER_RES_ID || id == INSTALLATION_ID
     }
 
     pub fn remove_user(&mut self, id: &str) -> Result<(), PresetError> {
@@ -414,6 +512,9 @@ impl PresetLibrary {
                 if lib.screens.is_empty() {
                     lib.screens = builtin_screens();
                 }
+                if lib.screen_rules.listed.is_empty() && lib.screen_rules.ultra_wide_names.is_empty() {
+                    lib.screen_rules = ScreenPresetRules::default();
+                }
                 Ok(lib)
             }
             Err(_) => {
@@ -468,6 +569,8 @@ fn slugify(s: &str) -> String {
 pub fn builtin_presets() -> Vec<ExportPreset> {
     vec![
         preset("system.h264-mp4", "H.264 Match Source", OutputFormat::H264Mp4, Quality::crf(23), true),
+        studio_h264(BETTER_RES_ID, "Better Res", 40.0, 50.0),
+        studio_h264(INSTALLATION_ID, "Installation", 15.0, 20.0),
         preset("system.hevc-mp4", "HEVC Match Source", OutputFormat::HevcMp4, Quality::crf(28), true),
         {
             let mut p = preset("system.prores-mov", "Apple ProRes 422", OutputFormat::ProResMov, Quality::Quality { value: 80 }, true);
@@ -516,6 +619,23 @@ fn preset(id: &str, name: &str, format: OutputFormat, quality: Quality, audio: b
         format,
         video: VideoSettings { quality, ..VideoSettings::default() },
         audio: AudioSettings { enabled: audio && format.ffmpeg_audio_codec().is_some(), ..AudioSettings::default() },
+    }
+}
+
+fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64) -> ExportPreset {
+    ExportPreset {
+        id: id.into(),
+        name: name.into(),
+        kind: PresetKind::System,
+        format: OutputFormat::H264Mp4,
+        video: VideoSettings {
+            frame_rate: FrameRate::Custom(25.0),
+            quality: Quality::vbr_2pass(target_mbps, max_mbps),
+            h264_profile: Some("high".into()),
+            h264_level: Some("auto".into()),
+            ..VideoSettings::default()
+        },
+        audio: AudioSettings { enabled: true, ..AudioSettings::default() },
     }
 }
 
@@ -588,6 +708,8 @@ mod tests {
         let ids: Vec<_> = builtin_presets().into_iter().map(|p| p.id).collect();
         for need in [
             "system.h264-mp4",
+            "system.better-res",
+            "system.installation",
             "system.hevc-mp4",
             "system.prores-mov",
             "system.webm-vp9",
@@ -649,5 +771,36 @@ mod tests {
         let m = p.merge_override(&over).unwrap();
         assert_eq!(m.video.quality, Quality::crf(18));
         assert_eq!(m.format, OutputFormat::H264Mp4);
+    }
+
+    #[test]
+    fn studio_presets_are_high_25fps_vbr() {
+        let lib = PresetLibrary::new();
+        let br = lib.get(BETTER_RES_ID).unwrap();
+        assert_eq!(br.name, "Better Res");
+        assert_eq!(br.video.frame_rate, FrameRate::Custom(25.0));
+        assert_eq!(br.video.h264_profile.as_deref(), Some("high"));
+        assert_eq!(br.video.quality, Quality::vbr_2pass(40.0, 50.0));
+        let inst = lib.get(INSTALLATION_ID).unwrap();
+        assert_eq!(inst.name, "Installation");
+        assert_eq!(inst.video.quality, Quality::vbr_2pass(15.0, 20.0));
+    }
+
+    #[test]
+    fn studio_bitrate_edits_persist_on_system_id() {
+        let mut lib = PresetLibrary::new();
+        let mut p = lib.get(BETTER_RES_ID).unwrap();
+        p.video.quality = Quality::vbr_2pass(36.0, 44.0);
+        lib.save_preset(p).unwrap();
+        let loaded = lib.get(BETTER_RES_ID).unwrap();
+        assert_eq!(loaded.video.quality, Quality::vbr_2pass(36.0, 44.0));
+        assert_eq!(loaded.kind, PresetKind::System);
+    }
+
+    #[test]
+    fn get_or_parse_studio_names() {
+        let lib = PresetLibrary::new();
+        assert_eq!(lib.get_or_parse("Better Res").unwrap().id, BETTER_RES_ID);
+        assert_eq!(lib.get_or_parse("installation").unwrap().id, INSTALLATION_ID);
     }
 }

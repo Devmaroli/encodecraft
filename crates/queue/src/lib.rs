@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use encodecraft_ffmpeg::EncodeProgress;
 use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize, Trim};
+use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_presets::{
-    apply_template, constrain_output_dir, default_template, output_path, unique_output_path, ExportPreset, NamingContext, PresetLibrary,
+    apply_template, constrain_output_dir, default_template, infer_screen_from_text, output_path, unique_output_path, ExportPreset, NamingContext,
+    PresetLibrary, PresetReason,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +65,15 @@ pub struct Job {
     pub trim: Trim,
     pub scale: ScaleMode,
     pub screen: Option<ScreenSize>,
+    /// Auto-assignment reason shown in the queue (`ultra wide`, `listed screen`, …).
+    #[serde(default)]
+    pub preset_reason: Option<PresetReason>,
+    /// User picked a different preset after auto-assignment.
+    #[serde(default)]
+    pub preset_overridden: bool,
+    /// Non-fatal / pre-encode flag (H.264 cannot encode this raster).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encode_warning: Option<String>,
     pub status: JobStatus,
     #[serde(default)]
     pub progress: ProgressSnap,
@@ -224,15 +235,39 @@ impl EncodeQueue {
 
         let mut jobs = Vec::new();
         let mut claimed: Vec<PathBuf> = Vec::new();
+        let source_hint = source_screen_hint(&req.source);
+        let auto = lib.screen_rules.is_auto_eligible(&req.preset_id);
         for (n, screen) in sizes.into_iter().enumerate() {
+            let mut screen = screen;
+            if screen.is_none() {
+                screen = infer_screen_from_text(&source_hint, &lib.screen_rules);
+            }
             let mut pr = preset.clone();
+            let mut preset_reason = None;
+            let mut preset_overridden = false;
+            if auto {
+                if let Some(pick) = lib.screen_rules.pick(screen.as_ref(), &source_hint) {
+                    if let Ok(chosen) = lib.get_or_parse(&pick.preset_id) {
+                        pr = chosen;
+                        preset_reason = Some(pick.reason);
+                    }
+                }
+            } else if !req.preset_id.is_empty() {
+                preset_overridden = true;
+                preset_reason = Some(PresetReason::Manual);
+            }
             pr.video.scale = scale;
             if let Some(sz) = &screen {
-                pr.video.width = Some(sz.width);
-                pr.video.height = Some(sz.height);
+                if sz.width > 0 {
+                    pr.video.width = Some(sz.width);
+                }
+                if sz.height > 0 {
+                    pr.video.height = Some(sz.height);
+                }
             }
             let w = pr.video.width.unwrap_or(0);
             let h = pr.video.height.unwrap_or(0);
+            let encode_warning = h264_unencodable_message(&pr, w, h);
             let id = new_id("job");
             let ctx = NamingContext::from_preset(
                 &req.source.display_name(),
@@ -264,6 +299,9 @@ impl EncodeQueue {
                 trim,
                 scale,
                 screen,
+                preset_reason,
+                preset_overridden,
+                encode_warning,
                 status: JobStatus::Waiting,
                 progress: ProgressSnap::default(),
                 log: String::new(),
@@ -307,6 +345,27 @@ impl EncodeQueue {
         }
         q
     }
+}
+
+fn source_screen_hint(source: &JobSource) -> String {
+    let mut bits = vec![source.display_name()];
+    match source {
+        JobSource::File { path, .. } => {
+            if let Some(n) = path.file_name() {
+                bits.push(n.to_string_lossy().into_owned());
+            }
+            bits.push(path.to_string_lossy().into_owned());
+        }
+        JobSource::EffectCraft { project, comp, .. } => {
+            if let Some(c) = comp {
+                bits.push(c.clone());
+            }
+            if let Some(n) = project.file_name() {
+                bits.push(n.to_string_lossy().into_owned());
+            }
+        }
+    }
+    bits.join(" ")
 }
 
 pub fn preview_name(source: &JobSource, preset: &ExportPreset, w: u32, h: u32, template: &str) -> String {
@@ -370,5 +429,55 @@ mod tests {
         req.output_dir = Some(PathBuf::from("/etc"));
         let err = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap_err();
         assert!(err.to_string().contains("inside"));
+    }
+
+    #[test]
+    fn auto_assigns_studio_presets_per_screen() {
+        let lib = PresetLibrary::new();
+        let mut req = req_many();
+        req.preset_id = "system.h264-mp4".into();
+        req.sizes = vec![
+            ScreenSize::new("The Avenues Gate", 1920, 1080),
+            ScreenSize::new("1.7HD", 1920, 1080),
+            ScreenSize::new("The Avenues Grand Avenues Entrance", 1920, 1080),
+            ScreenSize::new("1st Ring Road", 1008, 5184),
+            ScreenSize::new("Al Nassar Tower Vertical", 960, 5328),
+            ScreenSize::new("Kuwait Gate", 4460, 378),
+        ];
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(jobs[0].preset.id, "system.better-res");
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::UltraWide));
+        assert_eq!(jobs[1].preset.id, "system.installation");
+        assert_eq!(jobs[1].preset_reason, Some(PresetReason::OtherScreen));
+        assert_eq!(jobs[2].preset.id, "system.better-res");
+        assert_eq!(jobs[2].preset_reason, Some(PresetReason::ListedScreen));
+        assert_eq!(jobs[3].preset.id, "system.better-res");
+        assert_eq!(jobs[3].preset_reason, Some(PresetReason::ListedScreen));
+        assert!(jobs[3].encode_warning.is_none());
+        assert_eq!(jobs[4].preset.id, "system.better-res");
+        assert_eq!(jobs[5].preset_reason, Some(PresetReason::UltraWide));
+        assert_eq!(jobs[5].preset.id, "system.better-res");
+    }
+
+    #[test]
+    fn hevc_request_is_not_auto_replaced() {
+        let lib = PresetLibrary::new();
+        let mut req = req_many();
+        req.preset_id = "system.hevc-mp4".into();
+        req.sizes = vec![ScreenSize::new("The Avenues Gate", 1920, 1080)];
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        assert_eq!(jobs[0].preset.id, "system.hevc-mp4");
+        assert!(jobs[0].preset_overridden);
+    }
+
+    #[test]
+    fn huge_h264_canvas_is_flagged() {
+        let lib = PresetLibrary::new();
+        let mut req = req_many();
+        req.preset_id = "system.better-res".into();
+        req.sizes = vec![ScreenSize::new("Impossible", 32000, 32000)];
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        let msg = jobs[0].encode_warning.as_deref().unwrap_or("");
+        assert!(msg.contains("H.264 cannot encode"), "{msg}");
     }
 }

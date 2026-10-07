@@ -32,7 +32,11 @@ How to use it
 -------------
   • Drag video, audio, image sequences, or an EffectCraft .ecproj onto the window,
     or click  + Add. Dropping a .ecproj lets you pick which comps to queue.
-  • Pick a preset on the right (H.264 is a good default).
+  • Pick a preset on the right. Studio deliveries: Better Res (40/50 Mbps) and
+    Installation (15/20 Mbps). Double-click a preset to edit those numbers.
+  • Jobs that include a screen name/size pick Better Res or Installation
+    automatically (ultra-wide and listed screens vs everything else). The queue
+    shows which preset and why; you can override per item.
   • For several screen sizes from one file (for example 1920×1080 and 1080×1920),
     click  One → many sizes.
   • Click  Start queue.

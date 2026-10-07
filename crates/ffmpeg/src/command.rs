@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use encodecraft_job::{ScaleMode, Trim};
-use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, Quality};
+use encodecraft_presets::{mbps_to_kbps, ExportPreset, FrameRate, OutputFormat, Quality};
 
 use super::probe::MediaInfo;
 
@@ -11,6 +11,9 @@ use super::probe::MediaInfo;
 pub struct EncodePlan {
     pub args: Vec<String>,
     pub output: PathBuf,
+    /// x264 2-pass stats prefix; delete `prefix-0.log` (+ `.mbtree`) when the job finishes.
+    pub passlogfile: Option<PathBuf>,
+    pub pass: u8,
 }
 
 impl EncodePlan {
@@ -36,6 +39,87 @@ pub fn even(n: u32) -> u32 {
     n & !1
 }
 
+/// ITU-T H.264 High profile level 6.2: MaxFS = 139264 macroblocks; max side ≈ √(MaxFS×8)×16.
+const H264_L52_MAX_FS: u32 = 36_864;
+const H264_L62_MAX_FS: u32 = 139_264;
+
+fn h264_macroblocks(width: u32, height: u32) -> u32 {
+    let w = even(width).max(2);
+    let h = even(height).max(2);
+    w.div_ceil(16).saturating_mul(h.div_ceil(16))
+}
+
+fn h264_max_side_mbs(max_fs: u32) -> u32 {
+    ((f64::from(max_fs) * 8.0).sqrt().floor() as u32).max(1)
+}
+
+/// `Ok(Some("6.2"))` when any side > 4096 (or the frame exceeds level 5.2).
+/// `Ok(None)` = let x264 pick. `Err` = H.264 cannot encode this raster.
+pub fn h264_level_for_frame(width: u32, height: u32) -> Result<Option<&'static str>, String> {
+    let w = even(width).max(2);
+    let h = even(height).max(2);
+    let mbs = h264_macroblocks(w, h);
+    let wmbs = w.div_ceil(16);
+    let hmbs = h.div_ceil(16);
+    let max_side = h264_max_side_mbs(H264_L62_MAX_FS);
+    if mbs > H264_L62_MAX_FS || wmbs > max_side || hmbs > max_side {
+        return Err(format!(
+            "H.264 cannot encode {w}×{h}: the frame exceeds High Profile level 6.2 \
+             (max ~8K / {H264_L62_MAX_FS} macroblocks). Use HEVC or split the canvas."
+        ));
+    }
+    let l52_side = h264_max_side_mbs(H264_L52_MAX_FS);
+    if w > 4096 || h > 4096 || mbs > H264_L52_MAX_FS || wmbs > l52_side || hmbs > l52_side {
+        return Ok(Some("6.2"));
+    }
+    Ok(None)
+}
+
+/// Human-readable warning when this H.264 job cannot be encoded, else `None`.
+pub fn h264_unencodable_message(preset: &ExportPreset, width: u32, height: u32) -> Option<String> {
+    if preset.format != OutputFormat::H264Mp4 {
+        return None;
+    }
+    let w = preset.video.width.unwrap_or(width);
+    let h = preset.video.height.unwrap_or(height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    h264_level_for_frame(w, h).err()
+}
+
+fn two_pass_h264(p: &ExportPreset) -> bool {
+    p.format == OutputFormat::H264Mp4 && matches!(p.video.quality, Quality::Vbr2Pass { .. })
+}
+
+fn passlogfile_prefix(output: &Path) -> PathBuf {
+    let stem = output.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+    match output.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(format!(".{stem}.ffmpeg2pass")),
+        _ => PathBuf::from(format!(".{stem}.ffmpeg2pass")),
+    }
+}
+
+fn null_sink() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
+/// One plan, or pass-1 + pass-2 for studio VBR 2-pass H.264.
+pub fn build_encode_plans(input: PlanInput<'_>) -> Vec<EncodePlan> {
+    if two_pass_h264(input.preset) {
+        let stats = passlogfile_prefix(&input.output);
+        let p1 = build_encode_plan_pass(&input, Some(1), Some(&stats));
+        let p2 = build_encode_plan_pass(&input, Some(2), Some(&stats));
+        vec![p1, p2]
+    } else {
+        vec![build_encode_plan_pass(&input, None, None)]
+    }
+}
+
 pub struct PlanInput<'a> {
     pub source: &'a Path,
     pub output: PathBuf,
@@ -47,6 +131,11 @@ pub struct PlanInput<'a> {
 }
 
 pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
+    let output = input.output.clone();
+    build_encode_plans(input).pop().unwrap_or(EncodePlan { args: Vec::new(), output, passlogfile: None, pass: 0 })
+}
+
+fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: Option<&Path>) -> EncodePlan {
     let p = input.preset;
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-y".into(), "-nostdin".into(), "-progress".into(), "pipe:1".into(), "-nostats".into()];
 
@@ -93,7 +182,7 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
             }
         }
         match p.format {
-            OutputFormat::H264Mp4 => h264(&mut args, p, &vf),
+            OutputFormat::H264Mp4 => h264(&mut args, p, &vf, dst_w, dst_h, pass, passlogfile),
             OutputFormat::HevcMp4 => hevc(&mut args, p, &vf),
             OutputFormat::ProResMov => prores(&mut args, p, &vf),
             OutputFormat::WebmVp9 => vp9(&mut args, p, &vf),
@@ -106,7 +195,10 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
         args.push("-vn".into());
     }
 
-    if p.format.ffmpeg_audio_codec().is_some() && p.audio.enabled && p.format.has_video() {
+    let pass1 = pass == Some(1);
+    if pass1 {
+        args.push("-an".into());
+    } else if p.format.ffmpeg_audio_codec().is_some() && p.audio.enabled && p.format.has_video() {
         audio_encode(&mut args, p);
     } else if p.format.is_audio_only() {
         audio_encode(&mut args, p);
@@ -114,13 +206,20 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
         args.push("-an".into());
     }
 
-    if p.format == OutputFormat::H264Mp4 || p.format == OutputFormat::HevcMp4 {
+    if !pass1 && (p.format == OutputFormat::H264Mp4 || p.format == OutputFormat::HevcMp4) {
         args.push("-movflags".into());
         args.push("+faststart".into());
     }
 
-    args.push(argv_path(&input.output));
-    EncodePlan { args, output: input.output }
+    if pass1 {
+        args.push("-f".into());
+        args.push("null".into());
+        args.push(null_sink().into());
+        EncodePlan { args, output: PathBuf::from(null_sink()), passlogfile: passlogfile.map(Path::to_path_buf), pass: 1 }
+    } else {
+        args.push(argv_path(&input.output));
+        EncodePlan { args, output: input.output.clone(), passlogfile: passlogfile.map(Path::to_path_buf), pass: pass.unwrap_or(0) }
+    }
 }
 
 /// FFmpeg treats a path that starts with `-` as an option. Prefix relative ones with `./`.
@@ -165,6 +264,11 @@ fn quality_args(q: Quality, crf_flag: &str) -> Vec<String> {
         Quality::Crf { value } => vec![crf_flag.into(), value.to_string()],
         Quality::Bitrate { kbps } => vec!["-b:v".into(), format!("{kbps}k")],
         Quality::Quality { value } => vec!["-q:v".into(), jpeg_q(value).to_string()],
+        Quality::Vbr2Pass { target_mbps, max_mbps } => {
+            let t = mbps_to_kbps(target_mbps);
+            let m = mbps_to_kbps(max_mbps).max(t);
+            vec!["-b:v".into(), format!("{t}k"), "-maxrate".into(), format!("{m}k"), "-bufsize".into(), format!("{m}k")]
+        }
     }
 }
 
@@ -175,12 +279,39 @@ fn jpeg_q(quality_1_100: u8) -> u8 {
     v.clamp(2, 31) as u8
 }
 
-fn h264(args: &mut Vec<String>, p: &ExportPreset, vf: &[String]) {
-    args.extend(["-c:v".into(), "libx264".into(), "-preset".into(), "medium".into(), "-pix_fmt".into(), "yuv420p".into()]);
+fn h264(args: &mut Vec<String>, p: &ExportPreset, vf: &[String], w: u32, h: u32, pass: Option<u8>, passlogfile: Option<&Path>) {
+    args.extend(["-c:v".into(), "libx264".into()]);
+    if let Some(profile) = p.video.h264_profile.as_deref().filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto")) {
+        args.extend(["-profile:v".into(), profile.to_string()]);
+    }
+    let level = match p.video.h264_level.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() && !s.eq_ignore_ascii_case("auto") => Some(s.to_string()),
+        _ => h264_level_for_frame(w, h).ok().flatten().map(str::to_string),
+    };
+    if let Some(level) = level {
+        args.extend(["-level:v".into(), level]);
+    }
+    args.extend(["-preset".into(), "medium".into(), "-pix_fmt".into(), "yuv420p".into()]);
     match p.video.quality {
         Quality::Crf { value } => args.extend(["-crf".into(), value.to_string()]),
         Quality::Bitrate { kbps } => args.extend(["-b:v".into(), format!("{kbps}k")]),
         Quality::Quality { value } => args.extend(["-crf".into(), ((100 - value as u16) * 28 / 100).min(28).to_string()]),
+        Quality::Vbr2Pass { target_mbps, max_mbps } => {
+            let t = mbps_to_kbps(target_mbps);
+            let m = mbps_to_kbps(max_mbps).max(t);
+            args.extend(["-b:v".into(), format!("{t}k"), "-maxrate".into(), format!("{m}k"), "-bufsize".into(), format!("{m}k")]);
+        }
+    }
+    if let FrameRate::Custom(fps) = p.video.frame_rate {
+        if fps > 0.0 {
+            args.extend(["-r".into(), format!("{fps}"), "-fps_mode".into(), "cfr".into()]);
+        }
+    }
+    if let Some(n) = pass {
+        args.extend(["-pass".into(), n.to_string()]);
+        if let Some(log) = passlogfile {
+            args.extend(["-passlogfile".into(), argv_path(log)]);
+        }
     }
     push_vf(args, vf);
 }
@@ -204,6 +335,7 @@ fn vp9(args: &mut Vec<String>, p: &ExportPreset, vf: &[String]) {
         Quality::Crf { value } => args.extend(["-b:v".into(), "0".into(), "-crf".into(), value.to_string()]),
         Quality::Bitrate { kbps } => args.extend(["-b:v".into(), format!("{kbps}k")]),
         Quality::Quality { value } => args.extend(["-b:v".into(), "0".into(), "-crf".into(), (63u16.saturating_sub(value as u16 * 63 / 100)).to_string()]),
+        Quality::Vbr2Pass { target_mbps, .. } => args.extend(["-b:v".into(), format!("{}k", mbps_to_kbps(target_mbps))]),
     }
     push_vf(args, vf);
 }
@@ -451,5 +583,79 @@ mod tests {
         assert!(plan.args[i + 1].contains("hero_%04d.png"));
         assert!(sequence_pattern(Path::new("hero_0001.png")).is_some());
         assert!(sequence_pattern(Path::new("hero.mp4")).is_none());
+    }
+
+    #[test]
+    fn better_res_is_high_2pass_40mbps() {
+        let lib = PresetLibrary::new();
+        let mut p = lib.get("system.better-res").unwrap();
+        p.video.width = Some(1920);
+        p.video.height = Some(1080);
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("/out/ad.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        });
+        assert_eq!(plans.len(), 2);
+        let p1 = plans[0].args.join(" ");
+        let p2 = plans[1].args.join(" ");
+        assert!(p1.contains("-profile:v high"));
+        assert!(p1.contains("-b:v 40000k"));
+        assert!(p1.contains("-maxrate 50000k"));
+        assert!(p1.contains("-pass 1"));
+        assert!(p1.contains("-an"));
+        assert!(p1.contains("-f null"));
+        assert!(p2.contains("-pass 2"));
+        assert!(p2.contains("-r 25"));
+        assert!(p2.contains("-fps_mode cfr"));
+        assert!(p2.contains("-movflags +faststart"));
+        assert!(!p1.contains("-level:v"));
+        let inst = lib.get("system.installation").unwrap();
+        let mut inst = inst;
+        inst.video.width = Some(1920);
+        inst.video.height = Some(1080);
+        let s = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &inst,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        })
+        .args
+        .join(" ");
+        assert!(s.contains("-b:v 15000k"));
+        assert!(s.contains("-maxrate 20000k"));
+    }
+
+    #[test]
+    fn tall_canvas_selects_level_62() {
+        assert_eq!(h264_level_for_frame(1008, 5184).unwrap(), Some("6.2"));
+        assert_eq!(h264_level_for_frame(960, 5328).unwrap(), Some("6.2"));
+        assert_eq!(h264_level_for_frame(1920, 1080).unwrap(), None);
+        assert!(h264_level_for_frame(30000, 30000).is_err());
+        let lib = PresetLibrary::new();
+        let mut p = lib.get("system.better-res").unwrap();
+        p.video.width = Some(1008);
+        p.video.height = Some(5184);
+        let s = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        })
+        .args
+        .join(" ");
+        assert!(s.contains("-level:v 6.2"), "{s}");
+        assert!(h264_unencodable_message(&p, 1008, 5184).is_none());
+        p.video.width = Some(32000);
+        p.video.height = Some(32000);
+        let msg = h264_unencodable_message(&p, 32000, 32000).unwrap();
+        assert!(msg.contains("H.264 cannot encode"));
     }
 }

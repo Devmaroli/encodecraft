@@ -65,6 +65,17 @@ Unknown schema values return HTTP 400 with a readable error.
 `sizes` empty → one job at the preset's resolution (match source if unset).
 `sizes` set → one queue item per size ("one source to many screens").
 
+When `sizes[].name` (or the source file name / `{screen}` token) identifies a screen and
+`preset_id` is H.264 / Better Res / Installation / `auto`, EncodeCraft assigns:
+
+- **Better Res** (`system.better-res`) — ultra-wide landscape (`width/height > 5`),
+  the name exception **The Avenues Gate**, and listed screens (1st Ring Road,
+  Al Nassar Tower Vertical, Avenues Frame entrances). Reason shown on the queue:
+  `ultra wide` or `listed screen`.
+- **Installation** (`system.installation`) — every other named/sized screen.
+
+Rules are stored in `presets.json` (`screen_rules`) and can be edited in Settings.
+
 ### EffectCraft composition source
 
 Do **not** stream raw frames. EffectCraft already has a renderer. EncodeCraft asks
@@ -102,8 +113,13 @@ split After Effects / Media Encoder uses.
 
 ## Builtin preset ids
 
-`system.h264-mp4` `system.hevc-mp4` `system.prores-mov` `system.webm-vp9` `system.gif`
+`system.h264-mp4` `system.better-res` `system.installation` `system.hevc-mp4`
+`system.prores-mov` `system.webm-vp9` `system.gif`
 `system.png-sequence` `system.jpeg-sequence` `system.aac` `system.wav` `system.mp3`
+
+Studio H.264: **Better Res** is High @ 25 fps CFR, VBR 2-pass 40/50 Mbps; **Installation**
+is the same at 15/20 Mbps. Canvases with any side > 4096 use H.264 level 6.2. If the
+frame exceeds level 6.2, the queue item is flagged in-app instead of failing silently.
 
 ## Inbox fallback
 

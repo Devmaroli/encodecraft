@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::command::{build_encode_plan, PlanInput};
+use super::command::{build_encode_plans, h264_unencodable_message, PlanInput};
 use super::probe::{self, MediaInfo};
 use super::progress::{parse_progress_line, EncodeProgress};
 use super::{Ffmpeg, FfmpegError};
@@ -74,11 +74,59 @@ pub fn encode_with_stall(
     if let Some(parent) = tmp_out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let plan = build_encode_plan(PlanInput { source, output: tmp_out.clone(), preset, trim, media, sequence_start });
-    on_log(&plan.display_cmdline(&ff.ffmpeg));
+    let w = preset.video.width.or_else(|| media.map(|m| m.width())).unwrap_or(0);
+    let h = preset.video.height.or_else(|| media.map(|m| m.height())).unwrap_or(0);
+    if let Some(msg) = h264_unencodable_message(preset, w, h) {
+        return Err(FfmpegError::Message(msg));
+    }
 
+    let plans = build_encode_plans(PlanInput { source, output: tmp_out.clone(), preset, trim, media, sequence_start });
+    let n_passes = plans.len().max(1);
     let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));
+    let mut log = String::new();
+    let mut progress = EncodeProgress::default();
+    let stats = plans.iter().find_map(|p| p.passlogfile.clone());
 
+    for (i, plan) in plans.iter().enumerate() {
+        on_log(&plan.display_cmdline(&ff.ffmpeg));
+        if n_passes > 1 {
+            on_log(&format!("pass {}/{}", i + 1, n_passes));
+        }
+        match run_one_plan(ff, plan, duration, stall_secs, stop, &mut progress, &mut log, &mut on_progress, &mut on_log, i, n_passes) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = remove_partial(&tmp_out);
+                cleanup_passlog(stats.as_deref());
+                return Err(e);
+            }
+        }
+    }
+
+    if let Some(parent) = final_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    replace_file(&tmp_out, &final_out)?;
+    cleanup_passlog(stats.as_deref());
+    progress.done = true;
+    progress.percent = 100.0;
+    on_progress(&progress);
+    Ok(EncodeResult { output: final_out, log, progress })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one_plan(
+    ff: &Ffmpeg,
+    plan: &super::command::EncodePlan,
+    duration: Option<f64>,
+    stall_secs: u64,
+    stop: &EncodeStop,
+    progress: &mut EncodeProgress,
+    log: &mut String,
+    on_progress: &mut impl FnMut(&EncodeProgress),
+    on_log: &mut impl FnMut(&str),
+    pass_i: usize,
+    n_passes: usize,
+) -> Result<(), FfmpegError> {
     let mut child = ChildGuard {
         child: Some(Command::new(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -127,8 +175,6 @@ pub fn encode_with_stall(
     }
     drop(tx);
 
-    let mut progress = EncodeProgress::default();
-    let mut log = String::new();
     let mut cancelled = false;
     let mut stalled = false;
     let stall_for = Duration::from_secs(stall_secs.max(15));
@@ -142,8 +188,8 @@ pub fn encode_with_stall(
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Msg::Out(line)) => {
                 last_activity = Instant::now();
-                if parse_progress_line(&line, &mut progress, duration) {
-                    on_progress(&progress);
+                if parse_progress_line(&line, progress, duration) {
+                    on_progress(&scale_progress(progress, pass_i, n_passes));
                 }
             }
             Ok(Msg::Err(line)) => {
@@ -166,30 +212,60 @@ pub fn encode_with_stall(
     }
     let status = child.wait()?;
     if cancelled || stop.is_requested() {
-        let _ = remove_partial(&tmp_out);
         return Err(FfmpegError::Message("stopped".into()));
     }
     if stalled {
-        let _ = remove_partial(&tmp_out);
         return Err(FfmpegError::Message(format!("ffmpeg stalled (no output for {}s)", stall_for.as_secs())));
     }
     if !status.success() {
-        let _ = remove_partial(&tmp_out);
         let code = status.code().unwrap_or(-1);
-        let err = tail(&log, 4000);
+        let err = tail(log, 4000);
         if looks_like_disk_full(&err) {
             return Err(FfmpegError::Message("disk full".into()));
         }
-        return Err(FfmpegError::Encode { status: code, stderr: err });
+        return Err(FfmpegError::Encode { status: code, stderr: humanize_h264_error(&err, plan) });
     }
-    if let Some(parent) = final_out.parent() {
-        std::fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+fn scale_progress(p: &EncodeProgress, pass_i: usize, n_passes: usize) -> EncodeProgress {
+    if n_passes <= 1 {
+        return p.clone();
     }
-    replace_file(&tmp_out, &final_out)?;
-    progress.done = true;
-    progress.percent = 100.0;
-    on_progress(&progress);
-    Ok(EncodeResult { output: final_out, log, progress })
+    let span = 100.0 / n_passes as f32;
+    let mut q = p.clone();
+    q.done = false;
+    q.percent = (pass_i as f32).mul_add(span, (p.percent / 100.0) * span);
+    q
+}
+
+fn cleanup_passlog(prefix: Option<&Path>) {
+    let Some(prefix) = prefix else {
+        return;
+    };
+    let name = prefix.to_string_lossy();
+    for extra in ["-0.log", "-0.log.mbtree", ".log", ".log.mbtree"] {
+        let _ = std::fs::remove_file(format!("{name}{extra}"));
+    }
+}
+
+fn humanize_h264_error(stderr: &str, plan: &super::command::EncodePlan) -> String {
+    let s = stderr.to_ascii_lowercase();
+    let looks = s.contains("mb size")
+        || (s.contains("frame") && s.contains("too large"))
+        || s.contains("invalid level")
+        || s.contains("picture is too large")
+        || s.contains("width not divisible")
+        || s.contains("level restriction");
+    if looks {
+        format!(
+            "H.264 cannot encode this frame size with libx264 (output {}). FFmpeg said: {}",
+            plan.output.display(),
+            tail(stderr, 1500)
+        )
+    } else {
+        stderr.to_string()
+    }
 }
 
 struct ChildGuard {
@@ -357,5 +433,37 @@ mod tests {
     fn disk_full_sniff() {
         assert!(looks_like_disk_full("os error 28: No space left on device"));
         assert!(!looks_like_disk_full("invalid argument"));
+    }
+
+    #[test]
+    fn ffmpeg_encodes_tall_h264_level62() {
+        let Ok(ff) = crate::find_ffmpeg() else {
+            eprintln!("skip: ffmpeg not on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ec-h264-{}-{}", std::process::id(), unix_nanos()));
+        let _ = std::fs::create_dir_all(&dir);
+        for (w, h, name) in [(1008u32, 5184u32, "ring"), (960u32, 5328u32, "nassar")] {
+            let src = dir.join(format!("{name}-src.mp4"));
+            let out = dir.join(format!("{name}-out.mp4"));
+            let status = Command::new(&ff.ffmpeg)
+                .args(["-hide_banner", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={w}x{h}:rate=25:duration=0.2"), "-frames:v", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&src)
+                .status()
+                .expect("spawn lavfi");
+            assert!(status.success(), "lavfi {w}x{h} failed");
+            let lib = encodecraft_presets::PresetLibrary::new();
+            let mut preset = lib.get("system.better-res").unwrap();
+            preset.video.width = Some(w);
+            preset.video.height = Some(h);
+            preset.video.quality = encodecraft_presets::Quality::vbr_2pass(2.0, 3.0);
+            encode(&ff, &src, out.clone(), &preset, encodecraft_job::Trim::default(), None, &EncodeStop::new(), |_| {}, |_| {}).unwrap();
+            assert!(out.is_file() && out.metadata().map(|m| m.len() > 0).unwrap_or(false), "{name} empty");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn unix_nanos() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
     }
 }

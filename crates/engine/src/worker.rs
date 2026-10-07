@@ -86,6 +86,9 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     h.register_stop(id.to_string(), stop.clone());
 
     let job = h.lock(|s| s.queue.jobs.iter().find(|j| j.id == id).cloned()).ok_or_else(|| crate::EngineError::Message("job disappeared".into()))?;
+    if let Some(msg) = job.encode_warning.clone() {
+        return Err(crate::EngineError::Message(msg));
+    }
 
     let override_path = h.lock(|s| s.settings.ffmpeg_path.clone());
     let ff = find_ffmpeg_at(override_path.as_deref())?;

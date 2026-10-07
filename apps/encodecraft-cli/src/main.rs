@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use encodecraft_engine::{drop_inbox, fallback_naming, fallback_output, read_lock_port, write_lock, Handle};
-use encodecraft_ffmpeg::{build_encode_plan, encode_path, find_ffmpeg, probe, EncodeStop, Ffmpeg, PlanInput};
+use encodecraft_ffmpeg::{build_encode_plans, encode_path, find_ffmpeg, probe, EncodeStop, Ffmpeg, PlanInput};
 use encodecraft_job::{EnqueueRequest, JobSource, ScaleMode, DEFAULT_CONTROL_PORT, PORT_ENV, PRODUCT, TOKEN_HEADER};
 use encodecraft_presets::{parse_size_list, PresetLibrary};
 use encodecraft_queue::JobStatus;
@@ -144,7 +144,7 @@ fn print_cmd(args: &[String]) -> Result<(), String> {
     let lib = PresetLibrary::new();
     let preset = lib.get_or_parse(preset_id).map_err(|e| e.to_string())?;
     let dest = opt(args, "--out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("out.{}", preset.extension())));
-    let plan = build_encode_plan(PlanInput {
+    let plans = build_encode_plans(PlanInput {
         source: Path::new(file),
         output: dest,
         preset: &preset,
@@ -153,7 +153,12 @@ fn print_cmd(args: &[String]) -> Result<(), String> {
         sequence_start: None,
     });
     let ff = find_ffmpeg().map(|f| f.ffmpeg).unwrap_or_else(|_| PathBuf::from("ffmpeg"));
-    println!("{}", plan.display_cmdline(&ff));
+    for (i, plan) in plans.iter().enumerate() {
+        if plans.len() > 1 {
+            println!("# pass {}/{}", i + 1, plans.len());
+        }
+        println!("{}", plan.display_cmdline(&ff));
+    }
     Ok(())
 }
 

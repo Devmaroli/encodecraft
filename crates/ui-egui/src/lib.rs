@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, DropOutcome, Handle};
 use encodecraft_job::{ScaleMode, ScreenSize, PRODUCT};
-use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, Quality};
+use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
 use crate::theme::{ThemeKind, Tokens};
@@ -33,6 +33,9 @@ pub struct EncodeApp {
     last_persist: std::time::Instant,
     drop_notice: Option<(String, Instant)>,
     ecproj_picker: Option<EcprojPicker>,
+    rules_listed: String,
+    rules_ultra: String,
+    rules_hydrated: bool,
 }
 
 struct EcprojPicker {
@@ -70,6 +73,9 @@ impl EncodeApp {
             last_persist: std::time::Instant::now(),
             drop_notice: None,
             ecproj_picker: None,
+            rules_listed: String::new(),
+            rules_ultra: String::new(),
+            rules_hydrated: false,
         }
     }
 
@@ -393,7 +399,7 @@ impl EncodeApp {
                 } else {
                     t.row_alt
                 };
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 62.0), Sense::click());
                 ui.painter().rect_filled(rect, t.radius_sm, bg);
                 if resp.clicked() {
                     self.handle.lock(|s| s.selected = Some(job.id.clone()));
@@ -411,10 +417,19 @@ impl EncodeApp {
                             (Some(w), Some(h)) => format!("{w}×{h}"),
                             _ => "Match source".into(),
                         });
+                        let why = match (job.preset_overridden, job.preset_reason) {
+                            (true, _) => "override".to_string(),
+                            (_, Some(r)) => r.label().to_string(),
+                            _ => String::new(),
+                        };
+                        let preset_bit = if why.is_empty() {
+                            job.preset.name.clone()
+                        } else {
+                            format!("{} ({why})", job.preset.name)
+                        };
                         ui.label(
                             RichText::new(format!(
-                                "{}  ·  {size}  ·  {}",
-                                job.preset.name,
+                                "{preset_bit}  ·  {size}  ·  {}",
                                 job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                             ))
                             .size(11.0)
@@ -436,6 +451,8 @@ impl EncodeApp {
                                 )));
                             } else if let Some(err) = &job.error {
                                 ui.label(RichText::new(err).color(t.danger).size(11.0));
+                            } else if let Some(w) = &job.encode_warning {
+                                ui.label(RichText::new(w).color(t.warning).size(11.0));
                             }
                         });
                     });
@@ -521,6 +538,9 @@ impl EncodeApp {
                                     j.preset.video.width = Some(w);
                                     j.preset.video.height = Some(h);
                                 }
+                                j.preset_overridden = true;
+                                j.preset_reason = Some(PresetReason::Manual);
+                                j.encode_warning = encodecraft_ffmpeg::h264_unencodable_message(&j.preset, w.unwrap_or(0), h.unwrap_or(0));
                             }
                         }
                     });
@@ -557,11 +577,48 @@ impl EncodeApp {
         };
         ui.horizontal(|ui| {
             ui.label("Preset");
-            ui.label(RichText::new(&job.preset.name).strong());
+            let presets = self.handle.lock(|s| s.presets.all());
+            let current = job.preset.name.clone();
+            egui::ComboBox::from_id_salt("job-preset").selected_text(&current).show_ui(ui, |ui| {
+                for p in &presets {
+                    if ui.selectable_label(p.id == job.preset.id, &p.name).clicked() {
+                        let w = job.preset.video.width;
+                        let h = job.preset.video.height;
+                        let mut next = p.clone();
+                        next.video.width = w;
+                        next.video.height = h;
+                        next.video.scale = job.scale;
+                        job.preset = next;
+                        job.preset_overridden = true;
+                        job.preset_reason = Some(PresetReason::Manual);
+                    }
+                }
+            });
+            if let Some(r) = job.preset_reason {
+                let label = if job.preset_overridden { "override".into() } else { r.label().to_string() };
+                ui.label(RichText::new(format!("({label})")).color(t.text_dim).italics());
+            }
+            if job.preset_overridden && ui.small_button("Reset auto").clicked() {
+                if let Some(pick) = self.handle.lock(|s| s.presets.screen_rules.pick(job.screen.as_ref(), &job.source.display_name())) {
+                    if let Ok(pr) = self.handle.lock(|s| s.presets.get(&pick.preset_id)) {
+                        let w = job.preset.video.width;
+                        let h = job.preset.video.height;
+                        job.preset = pr;
+                        job.preset.video.width = w;
+                        job.preset.video.height = h;
+                        job.preset.video.scale = job.scale;
+                        job.preset_overridden = false;
+                        job.preset_reason = Some(pick.reason);
+                    }
+                }
+            }
             ui.separator();
             ui.label("Output");
             ui.add(egui::Label::new(job.output.to_string_lossy().to_string()).truncate());
         });
+        if let Some(w) = &job.encode_warning {
+            ui.label(RichText::new(w).color(t.warning).size(12.0));
+        }
         ui.add_space(4.0);
         egui::Grid::new("enc-grid").num_columns(4).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Format");
@@ -587,12 +644,12 @@ impl EncodeApp {
 
             ui.label("Width");
             let mut w = job.preset.video.width.unwrap_or(0) as i32;
-            if ui.add(egui::DragValue::new(&mut w).range(0..=7680).suffix(" px")).changed() {
+            if ui.add(egui::DragValue::new(&mut w).range(0..=16384).suffix(" px")).changed() {
                 job.preset.video.width = if w == 0 { None } else { Some(w as u32) };
             }
             ui.label("Height");
             let mut h = job.preset.video.height.unwrap_or(0) as i32;
-            if ui.add(egui::DragValue::new(&mut h).range(0..=4320).suffix(" px")).changed() {
+            if ui.add(egui::DragValue::new(&mut h).range(0..=16384).suffix(" px")).changed() {
                 job.preset.video.height = if h == 0 { None } else { Some(h as u32) };
             }
             ui.end_row();
@@ -626,10 +683,19 @@ impl EncodeApp {
                 Quality::Quality { value } => {
                     ui.add(egui::Slider::new(value, 1..=100).text("quality"));
                 }
+                Quality::Vbr2Pass { target_mbps, max_mbps } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Target Mbps");
+                        ui.add(egui::DragValue::new(target_mbps).range(1.0..=200.0).speed(0.5));
+                        ui.label("Max Mbps");
+                        ui.add(egui::DragValue::new(max_mbps).range(1.0..=250.0).speed(0.5));
+                    });
+                }
             }
-            if ui.button("CRF / bitrate").clicked() {
+            if ui.button("CRF / bitrate / 2-pass").clicked() {
                 job.preset.video.quality = match job.preset.video.quality {
                     Quality::Crf { .. } => Quality::bitrate(5000),
+                    Quality::Bitrate { .. } => Quality::vbr_2pass(15.0, 20.0),
                     _ => Quality::crf(23),
                 };
             }
@@ -654,6 +720,11 @@ impl EncodeApp {
             ui.end_row();
         });
         let id = job.id.clone();
+        job.encode_warning = encodecraft_ffmpeg::h264_unencodable_message(
+            &job.preset,
+            job.preset.video.width.unwrap_or(0),
+            job.preset.video.height.unwrap_or(0),
+        );
         self.handle.lock(|s| {
             if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
                 *j = job;
@@ -746,8 +817,46 @@ impl EncodeApp {
             ui.label(RichText::new("EffectCraft posts to 127.0.0.1:this").small());
         });
         ui.checkbox(&mut s.auto_start_queue, "Start the queue when a job arrives from EffectCraft / the CLI");
+        ui.add_space(8.0);
+        ui.label(RichText::new("Studio screen assignment").strong());
+        ui.label(
+            RichText::new("Sized jobs pick Better Res (ultra wide / listed screens) or Installation. Edit these lists to add screens later; stored in presets.json.")
+                .small()
+                .color(self.t().text_dim),
+        );
+        if !self.rules_hydrated {
+            let (listed, ultra, enabled, aspect) = self.handle.lock(|x| {
+                (
+                    x.presets.screen_rules.listed_as_text(),
+                    x.presets.screen_rules.ultra_wide_names_text(),
+                    x.presets.screen_rules.enabled,
+                    x.presets.screen_rules.ultra_wide_aspect,
+                )
+            });
+            self.rules_listed = listed;
+            self.rules_ultra = ultra;
+            self.rules_hydrated = true;
+            let _ = (enabled, aspect);
+        }
+        let mut enabled = self.handle.lock(|x| x.presets.screen_rules.enabled);
+        let mut aspect = self.handle.lock(|x| x.presets.screen_rules.ultra_wide_aspect);
+        ui.checkbox(&mut enabled, "Auto-assign Better Res / Installation from screen name and size");
+        ui.horizontal(|ui| {
+            ui.label("Ultra-wide if landscape and width/height >");
+            ui.add(egui::DragValue::new(&mut aspect).range(1.0..=20.0).speed(0.1));
+        });
+        ui.label("Always ultra-wide names (one per line)");
+        ui.add(egui::TextEdit::multiline(&mut self.rules_ultra).desired_width(480.0).desired_rows(3));
+        ui.label("Better Res listed screens  (Name | aliases | WxH)");
+        ui.add(egui::TextEdit::multiline(&mut self.rules_listed).desired_width(480.0).desired_rows(6));
         if ui.button("Apply settings").clicked() {
-            self.handle.lock(|sess| sess.settings = s.clone());
+            self.handle.lock(|sess| {
+                sess.settings = s.clone();
+                sess.presets.screen_rules.enabled = enabled;
+                sess.presets.screen_rules.ultra_wide_aspect = aspect;
+                sess.presets.screen_rules.set_ultra_wide_names_from_text(&self.rules_ultra);
+                sess.presets.screen_rules.set_listed_from_text(&self.rules_listed);
+            });
             self.handle.persist();
             self.status = "Settings saved".into();
         }
@@ -922,22 +1031,70 @@ impl EncodeApp {
     fn preset_edit_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_preset_edit;
         let mut save = false;
+        let dim = self.t().text_dim;
         if let Some(p) = self.edit_preset.as_mut() {
-            egui::Window::new("Edit preset").open(&mut open).show(ctx, |ui| {
+            egui::Window::new("Edit preset").open(&mut open).default_width(420.0).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut p.name);
                 });
                 ui.label(format!("id  {}", p.id));
                 ui.label(p.format.label());
-                if ui.button("Save user preset").clicked() {
+                if p.format == OutputFormat::H264Mp4 {
+                    ui.horizontal(|ui| {
+                        ui.label("H.264 profile");
+                        let mut profile = p.video.h264_profile.clone().unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut profile).desired_width(80.0).hint_text("high")).changed() {
+                            p.video.h264_profile = if profile.trim().is_empty() { None } else { Some(profile) };
+                        }
+                        ui.label("Level");
+                        let mut level = p.video.h264_level.clone().unwrap_or_else(|| "auto".into());
+                        if ui.add(egui::TextEdit::singleline(&mut level).desired_width(60.0).hint_text("auto")).changed() {
+                            p.video.h264_level = if level.trim().is_empty() { Some("auto".into()) } else { Some(level) };
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Frame rate");
+                    let mut fps_src = matches!(p.video.frame_rate, FrameRate::Source);
+                    if ui.checkbox(&mut fps_src, "Match source").changed() {
+                        p.video.frame_rate = if fps_src { FrameRate::Source } else { FrameRate::Custom(25.0) };
+                    }
+                    if let FrameRate::Custom(ref mut f) = p.video.frame_rate {
+                        ui.add(egui::DragValue::new(f).range(1.0..=120.0).suffix(" fps"));
+                    }
+                });
+                match &mut p.video.quality {
+                    Quality::Vbr2Pass { target_mbps, max_mbps } => {
+                        ui.horizontal(|ui| {
+                            ui.label("Target Mbps");
+                            ui.add(egui::DragValue::new(target_mbps).range(1.0..=200.0).speed(0.5));
+                            ui.label("Max Mbps");
+                            ui.add(egui::DragValue::new(max_mbps).range(1.0..=250.0).speed(0.5));
+                        });
+                        ui.label(RichText::new("VBR 2-pass — change these numbers to retarget bitrate.").small().color(dim));
+                    }
+                    Quality::Crf { value } => {
+                        ui.add(egui::Slider::new(value, 0..=51).text("CRF"));
+                    }
+                    Quality::Bitrate { kbps } => {
+                        ui.add(egui::DragValue::new(kbps).range(100..=200_000).prefix("kbps "));
+                    }
+                    Quality::Quality { value } => {
+                        ui.add(egui::Slider::new(value, 1..=100).text("quality"));
+                    }
+                }
+                if ui.button("Save preset").clicked() {
                     save = true;
                 }
             });
         }
         if save {
             if let Some(p) = self.edit_preset.clone() {
-                let _ = self.handle.lock(|s| s.presets.upsert_user(p));
+                match self.handle.lock(|s| s.presets.save_preset(p.clone()).or_else(|_| s.presets.upsert_user(p))) {
+                    Ok(()) => self.status = "Preset saved".into(),
+                    Err(e) => self.status = e.to_string(),
+                }
                 self.handle.persist();
             }
             open = false;

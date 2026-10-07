@@ -104,6 +104,12 @@ Data dir (queue / presets / inbox): `%APPDATA%\EncodeCraft\EncodeCraft` on Windo
 [docs/effectcraft-integration.md](docs/effectcraft-integration.md) — Send to Encoder Queue  
 [patches/](patches/) — drop-in command + applyable patch
 
+## Security
+
+The encode queue listens on `127.0.0.1:9878` with a per-install token. See
+[docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) for the threat model, what we hardened,
+and what is still out of scope before using this on client work.
+
 ## License
 
 MIT OR Apache-2.0. See `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`.

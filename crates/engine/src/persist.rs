@@ -28,6 +28,12 @@ pub struct Settings {
     pub auto_start_queue: bool,
     #[serde(default)]
     pub watch_folders: Vec<WatchFolder>,
+    /// When false (default), existing output files get a `-2` suffix instead of being replaced.
+    #[serde(default)]
+    pub allow_overwrite: bool,
+    /// Kill FFmpeg if it prints nothing for this many seconds.
+    #[serde(default = "default_stall")]
+    pub stall_timeout_sec: u64,
 }
 
 fn default_parallel() -> usize {
@@ -42,6 +48,9 @@ fn default_preset() -> String {
 fn default_port() -> u16 {
     DEFAULT_CONTROL_PORT
 }
+fn default_stall() -> u64 {
+    120
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -55,35 +64,26 @@ impl Default for Settings {
             http_port: DEFAULT_CONTROL_PORT,
             auto_start_queue: false,
             watch_folders: Vec::new(),
+            allow_overwrite: false,
+            stall_timeout_sec: 120,
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        let Ok(bytes) = std::fs::read(path) else {
-            return Self::default();
-        };
-        serde_json::from_slice(&bytes).unwrap_or_default()
+        crate::fsutil::load_json_or_quarantine(path).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<(), EngineError> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
+        crate::fsutil::atomic_write(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 }
 
 pub fn load_queue(path: &Path) -> EncodeQueue {
-    let Ok(bytes) = std::fs::read(path) else {
-        return EncodeQueue::new();
-    };
-    match serde_json::from_slice::<EncodeQueue>(&bytes) {
-        Ok(mut q) => {
+    match crate::fsutil::load_json_or_quarantine::<EncodeQueue>(path) {
+        Some(mut q) => {
             for j in &mut q.jobs {
                 if j.status.is_active() {
                     j.status = encodecraft_queue::JobStatus::Waiting;
@@ -91,16 +91,11 @@ pub fn load_queue(path: &Path) -> EncodeQueue {
             }
             q
         }
-        Err(_) => EncodeQueue::new(),
+        None => EncodeQueue::new(),
     }
 }
 
 pub fn save_queue(path: &Path, q: &EncodeQueue) -> Result<(), EngineError> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&q.persist_view())?)?;
-    std::fs::rename(&tmp, path)?;
+    crate::fsutil::atomic_write(path, &serde_json::to_vec_pretty(&q.persist_view())?)?;
     Ok(())
 }

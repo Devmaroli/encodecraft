@@ -4,7 +4,9 @@
 
 mod naming;
 
-pub use naming::{apply_template, default_template, output_path, sanitize_filename, NamingContext};
+pub use naming::{
+    apply_template, constrain_output_dir, default_template, is_under, normalize_path, output_path, sanitize_filename, unique_output_path, NamingContext,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -398,7 +400,7 @@ impl PresetLibrary {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_vec_pretty(self)?)?;
+        atomic_write(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 
@@ -406,11 +408,32 @@ impl PresetLibrary {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let mut lib: Self = serde_json::from_slice(&std::fs::read(path)?)?;
-        if lib.screens.is_empty() {
-            lib.screens = builtin_screens();
+        let bytes = std::fs::read(path)?;
+        match serde_json::from_slice::<Self>(&bytes) {
+            Ok(mut lib) => {
+                if lib.screens.is_empty() {
+                    lib.screens = builtin_screens();
+                }
+                Ok(lib)
+            }
+            Err(_) => {
+                let bad = path.with_extension("json.corrupt");
+                let _ = std::fs::rename(path, bad);
+                Ok(Self::new())
+            }
         }
-        Ok(lib)
+    }
+}
+
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp, path)
+        }
     }
 }
 

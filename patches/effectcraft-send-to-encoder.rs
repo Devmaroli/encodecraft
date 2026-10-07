@@ -9,7 +9,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use encodecraft_job::{DEFAULT_CONTROL_PORT, EnqueueReply, EnqueueRequest, JobSource};
+use encodecraft_job::{discover_ipc_token, DEFAULT_CONTROL_PORT, EnqueueReply, EnqueueRequest, JobSource, TOKEN_HEADER};
 
 pub const COMMAND_ID: &str = "file.sendToEncodeCraft";
 pub const MENU: &str = "Composition";
@@ -74,7 +74,11 @@ pub fn send(params: SendParams) -> Result<Vec<String>, String> {
 fn post(port: u16, req: &EnqueueRequest) -> Result<Vec<String>, String> {
     let body = req.to_vec().map_err(|e| e.to_string())?;
     let mut s = TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().map_err(|e| e.to_string())?, Duration::from_secs(2)).map_err(|e| format!("EncodeCraft is not listening on 127.0.0.1:{port}: {e}"))?;
-    let head = format!("POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let tok = discover_ipc_token().unwrap_or_default();
+    let head = format!(
+        "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     s.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
     s.write_all(&body).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();

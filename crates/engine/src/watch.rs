@@ -1,15 +1,20 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
 use encodecraft_job::{EnqueueRequest, JobSource, ScreenSize};
+use encodecraft_presets::is_under;
 use serde::{Deserialize, Serialize};
 
+use crate::fsutil;
 use crate::Handle;
 
 const VIDEO_EXT: &[&str] =
     &["mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m4v", "mpg", "mpeg", "wmv", "gif", "png", "jpg", "jpeg", "wav", "mp3", "aac", "m4a", "aif", "aiff"];
+
+/// Skip absurd files (likely a copy error or a zip bomb dropped on the folder).
+const MAX_WATCH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WatchFolder {
@@ -31,27 +36,67 @@ impl WatchFolder {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Fingerprint {
+    size: u64,
+    mtime: u64,
+    ticks: u8,
+}
+
 pub fn run(h: Handle) {
-    let mut seen: HashSet<String> = HashSet::new();
-    // Prime: don't encode files that were already in the folder.
+    let mut seen: HashMap<String, Fingerprint> = HashMap::new();
     h.lock(|s| {
         for w in &s.settings.watch_folders {
             for p in list_media(&w.path, w.recursive) {
-                seen.insert(key(&p));
+                if let Some(fp) = fingerprint(&p) {
+                    seen.insert(key(&p), Fingerprint { ticks: 8, ..fp });
+                }
             }
         }
     });
     loop {
         thread::sleep(Duration::from_secs(2));
-        let folders = h.lock(|s| s.settings.watch_folders.clone());
+        let (folders, output_dir, work_dir) = h.lock(|s| (s.settings.watch_folders.clone(), s.settings.output_dir.clone(), crate::paths::work_dir()));
         for w in folders {
             if !w.enabled {
                 continue;
             }
+            let skip_out = w.output_dir.clone().unwrap_or_else(|| output_dir.clone());
             for p in list_media(&w.path, w.recursive) {
-                let k = key(&p);
-                if !seen.insert(k) {
+                if fsutil::is_symlink(&p) {
                     continue;
+                }
+                if is_under(&p, &skip_out) || is_under(&p, &output_dir) || is_under(&p, &work_dir) {
+                    continue;
+                }
+                if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("encodecraft-partial")) {
+                    continue;
+                }
+                let Some(fp) = fingerprint(&p) else {
+                    continue;
+                };
+                if fp.size == 0 || fp.size > MAX_WATCH_BYTES {
+                    continue;
+                }
+                let k = key(&p);
+                match seen.get_mut(&k) {
+                    Some(prev) if prev.size == fp.size && prev.mtime == fp.mtime => {
+                        if prev.ticks < 3 {
+                            prev.ticks = prev.ticks.saturating_add(1);
+                        }
+                        if prev.ticks != 2 {
+                            continue;
+                        }
+                        prev.ticks = 3;
+                    }
+                    Some(prev) => {
+                        *prev = Fingerprint { ticks: 1, ..fp };
+                        continue;
+                    }
+                    None => {
+                        seen.insert(k, Fingerprint { ticks: 1, ..fp });
+                        continue;
+                    }
                 }
                 let req = EnqueueRequest {
                     schema: 1,
@@ -65,26 +110,29 @@ pub fn run(h: Handle) {
                     scale: None,
                     start_queue: true,
                 };
-                let _ = h.enqueue(req);
+                let _ = h.enqueue_trusted(req);
             }
         }
     }
 }
 
-fn key(p: &std::path::Path) -> String {
-    let meta = std::fs::metadata(p).ok();
-    let mtime = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-    format!("{}:{mtime}:{sz}", p.display())
+fn fingerprint(p: &Path) -> Option<Fingerprint> {
+    let meta = std::fs::metadata(p).ok()?;
+    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64)?;
+    Some(Fingerprint { size: meta.len(), mtime, ticks: 0 })
 }
 
-fn list_media(root: &std::path::Path, recursive: bool) -> Vec<PathBuf> {
+fn key(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+fn list_media(root: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(root, recursive, 0, &mut out);
     out
 }
 
-fn walk(dir: &std::path::Path, recursive: bool, depth: u32, out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, recursive: bool, depth: u32, out: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;
     }
@@ -93,7 +141,11 @@ fn walk(dir: &std::path::Path, recursive: bool, depth: u32, out: &mut Vec<PathBu
     };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        let ft = e.file_type().ok();
+        if ft.as_ref().is_some_and(|t| t.is_symlink()) {
+            continue;
+        }
+        if ft.as_ref().is_some_and(|t| t.is_dir()) {
             if recursive {
                 walk(&p, true, depth.saturating_add(1), out);
             }
@@ -103,5 +155,18 @@ fn walk(dir: &std::path::Path, recursive: bool, depth: u32, out: &mut Vec<PathBu
         if VIDEO_EXT.iter().any(|x| *x == ext) {
             out.push(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_partial_and_output_dir() {
+        let out = PathBuf::from("/exports");
+        let inside = PathBuf::from("/exports/clip.mp4");
+        assert!(is_under(&inside, &out));
+        assert!(!is_under(Path::new("/incoming/clip.mp4"), &out));
     }
 }

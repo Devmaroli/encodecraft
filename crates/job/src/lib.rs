@@ -36,6 +36,21 @@ pub const EFFECTCRAFT_CLI_ENV: &str = "EFFECTCRAFT_CLI";
 /// Environment variable that overrides the control/HTTP port.
 pub const PORT_ENV: &str = "ENCODECRAFT_PORT";
 
+/// Shared secret for the loopback control server. Prefer the header; env is a fallback.
+pub const TOKEN_ENV: &str = "ENCODECRAFT_TOKEN";
+
+/// HTTP header carrying the control-server token (`X-EncodeCraft-Token`).
+pub const TOKEN_HEADER: &str = "X-EncodeCraft-Token";
+
+/// File name of the per-install token inside the EncodeCraft data directory.
+pub const TOKEN_FILE: &str = "ipc-token";
+
+/// Maximum POST / JSON-lines body we will parse (enqueue JSON is tiny).
+pub const MAX_CONTROL_BODY: usize = 256 * 1024;
+
+/// Hard cap on one-source-many-sizes expansion.
+pub const MAX_SIZES: usize = 64;
+
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
     #[error("unsupported job schema {found} (this encoder understands 1..={max})")]
@@ -239,6 +254,9 @@ impl EnqueueRequest {
             }
             _ => {}
         }
+        if self.sizes.len() > MAX_SIZES {
+            return Err(JobError::Message(format!("too many sizes (max {MAX_SIZES})")));
+        }
         for sz in &self.sizes {
             if sz.width == 0 || sz.height == 0 {
                 return Err(JobError::Message(format!("invalid screen size {}", sz.label())));
@@ -276,6 +294,53 @@ pub struct ControlRequest {
     pub method: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Required on the JSON-lines channel (HTTP uses [`TOKEN_HEADER`] instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+/// Load the per-install control token (env, then `ENCODECRAFT_HOME`, then the platform data dir).
+///
+/// EffectCraft should call this and send the value as [`TOKEN_HEADER`]. The file is created
+/// by EncodeCraft on first launch; it is not a password the user types.
+pub fn discover_ipc_token() -> Option<String> {
+    if let Ok(t) = std::env::var(TOKEN_ENV) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    for dir in ipc_token_dirs() {
+        if let Ok(s) = std::fs::read_to_string(dir.join(TOKEN_FILE)) {
+            let t = s.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+fn ipc_token_dirs() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(home) = std::env::var(HOME_ENV) {
+        v.push(PathBuf::from(home));
+    }
+    if cfg!(windows) {
+        if let Some(base) = std::env::var_os("APPDATA") {
+            v.push(PathBuf::from(base).join("EncodeCraft").join("EncodeCraft"));
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(home).join("Library/Application Support/dev.EncodeCraft.EncodeCraft"));
+        }
+    } else if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            v.push(PathBuf::from(xdg).join(APP_ID));
+        }
+        v.push(PathBuf::from(home).join(".local/share").join(APP_ID));
+    }
+    v
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -348,5 +413,23 @@ mod tests {
     fn scale_mode_aliases() {
         assert_eq!(ScaleMode::parse_name("contain"), Some(ScaleMode::Fit));
         assert_eq!(ScaleMode::parse_name("cover"), Some(ScaleMode::Fill));
+    }
+
+    #[test]
+    fn rejects_too_many_sizes() {
+        let sizes: Vec<ScreenSize> = (0..MAX_SIZES + 1).map(|i| ScreenSize::new(format!("s{i}"), 64, 64)).collect();
+        let req = EnqueueRequest {
+            schema: SCHEMA,
+            source: JobSource::file("a.mp4"),
+            preset_id: "x".into(),
+            preset_override: None,
+            output_dir: None,
+            naming: None,
+            sizes,
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        assert!(req.validate().is_err());
     }
 }

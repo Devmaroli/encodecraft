@@ -9,14 +9,25 @@ Default control port: **9878** on `127.0.0.1` (EffectCraft's control channel is 
 
 ```
 POST /v1/enqueue
+Host: 127.0.0.1
 Content-Type: application/json
+X-EncodeCraft-Token: <token>
 
-GET  /health          → {"ok":true,"product":"EncodeCraft"}
-GET  /v1/queue        → current jobs
+GET  /health          → {"ok":true,"product":"EncodeCraft"}   (no token)
+GET  /v1/queue        → current jobs                         (token required)
 POST /v1/control      → {"id":1,"method":"queue.start","params":{}}
 ```
 
-JSON-lines on the same port (EffectCraft-style): one `{ "id", "method", "params" }` per line.
+The token is created on first launch in the data dir as `ipc-token` (or `ENCODECRAFT_TOKEN`).
+`encodecraft-cli` and the EffectCraft handoff send it automatically. Browser `Origin` /
+cross-site `Sec-Fetch-Site` requests are rejected. There is no CORS header; bind is
+`127.0.0.1` only.
+
+JSON-lines on the same port (EffectCraft-style): one `{ "id", "method", "params", "token" }` per line.
+
+`output_dir` on an HTTP/inbox job must be the configured EncodeCraft output folder or a
+subfolder of it. Naming tokens cannot escape that folder. Existing files are not overwritten
+unless Settings ▸ allow overwrite is on (otherwise `-2`, `-3`, … is appended).
 
 ## Enqueue body
 

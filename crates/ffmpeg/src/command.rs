@@ -53,7 +53,7 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
         args.push(format_secs(input.trim.in_sec));
     }
     args.push("-i".into());
-    args.push(input.source.to_string_lossy().into_owned());
+    args.push(argv_path(input.source));
     if let Some(dur) = input.trim.duration_sec(input.media.and_then(|m| m.duration_sec)) {
         args.push("-t".into());
         args.push(format_secs(dur));
@@ -103,8 +103,23 @@ pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
         args.push("+faststart".into());
     }
 
-    args.push(input.output.to_string_lossy().into_owned());
+    args.push(argv_path(&input.output));
     EncodePlan { args, output: input.output }
+}
+
+/// FFmpeg treats a path that starts with `-` as an option. Prefix relative ones with `./`.
+pub fn argv_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let fname = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if s.starts_with('-') || fname.starts_with('-') {
+        if p.is_absolute() {
+            s.into_owned()
+        } else {
+            format!("./{}", s.trim_start_matches("./"))
+        }
+    } else {
+        s.into_owned()
+    }
 }
 
 fn push_vf(args: &mut Vec<String>, vf: &[String]) {
@@ -344,5 +359,23 @@ mod tests {
     fn even_dims() {
         assert_eq!(even(1920), 1920);
         assert_eq!(even(1081), 1080);
+    }
+
+    #[test]
+    fn leading_dash_paths_are_prefixed() {
+        assert_eq!(argv_path(Path::new("-ss.mp4")), "./-ss.mp4");
+        assert_eq!(argv_path(Path::new("/tmp/-ss.mp4")), "/tmp/-ss.mp4");
+        let lib = PresetLibrary::new();
+        let preset = lib.get("system.h264-mp4").unwrap();
+        let plan = build_encode_plan(PlanInput {
+            source: Path::new("-evil.mov"),
+            output: PathBuf::from("-out.mp4"),
+            preset: &preset,
+            trim: Trim::default(),
+            media: None,
+        });
+        let i = plan.args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(plan.args[i + 1], "./-evil.mov");
+        assert_eq!(plan.args.last().unwrap(), "./-out.mp4");
     }
 }

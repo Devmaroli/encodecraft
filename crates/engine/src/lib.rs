@@ -4,9 +4,11 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod fsutil;
 mod ipc;
 mod paths;
 mod persist;
+mod token;
 mod watch;
 mod worker;
 
@@ -21,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use encodecraft_ffmpeg::{find_ffmpeg, probe, thumbnail_png, EncodeStop, Ffmpeg, FfmpegError};
+use encodecraft_ffmpeg::{find_ffmpeg_at, probe, thumbnail_png, EncodeStop, Ffmpeg, FfmpegError};
 use encodecraft_job::{ControlReply, ControlRequest, EnqueueRequest};
 use encodecraft_presets::{default_output_dir, default_template, ExportPreset, PresetLibrary};
 use encodecraft_queue::{EncodeQueue, Job, JobStatus, QueueError};
@@ -85,8 +87,17 @@ impl Handle {
     }
 
     pub fn enqueue(&self, req: EnqueueRequest) -> Result<Vec<String>, EngineError> {
+        // Untrusted (HTTP / inbox): keep output inside the configured folder.
+        self.enqueue_with(req, true)
+    }
+
+    pub fn enqueue_trusted(&self, req: EnqueueRequest) -> Result<Vec<String>, EngineError> {
+        self.enqueue_with(req, false)
+    }
+
+    fn enqueue_with(&self, req: EnqueueRequest, clamp_output: bool) -> Result<Vec<String>, EngineError> {
         self.lock(|s| {
-            let ids = s.queue.enqueue(&req, &s.presets, &s.settings.output_dir, &s.settings.naming)?;
+            let ids = s.queue.enqueue(&req, &s.presets, &s.settings.output_dir, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
             let _ = s.save();
             Ok(ids)
         })
@@ -103,6 +114,7 @@ impl Handle {
         match method {
             "enqueue" | "queue.enqueue" => {
                 let req: EnqueueRequest = serde_json::from_value(params.clone()).map_err(|e| EngineError::Message(e.to_string()))?;
+                req.validate().map_err(|e| EngineError::Message(e.to_string()))?;
                 let ids = self.enqueue(req)?;
                 Ok(json!({ "ids": ids }))
             }
@@ -210,6 +222,7 @@ pub struct Session {
     pub ffmpeg: Result<Ffmpeg, FfmpegError>,
     pub log: Vec<String>,
     pub selected: Option<String>,
+    pub ipc_token: String,
 }
 
 impl Session {
@@ -218,8 +231,9 @@ impl Session {
         let settings = Settings::load(&paths::settings_path());
         let presets = PresetLibrary::load(&paths::presets_path()).unwrap_or_else(|_| PresetLibrary::new());
         let queue = persist::load_queue(&paths::queue_path());
-        let ffmpeg = find_ffmpeg();
-        Ok(Self { queue, presets, settings, ffmpeg, log: Vec::new(), selected: None })
+        let ffmpeg = find_ffmpeg_at(settings.ffmpeg_path.as_deref());
+        let ipc_token = token::load_or_create().unwrap_or_default();
+        Ok(Self { queue, presets, settings, ffmpeg, log: Vec::new(), selected: None, ipc_token })
     }
 
     pub fn save(&self) -> Result<(), EngineError> {
@@ -232,8 +246,8 @@ impl Session {
 
     pub fn push_log(&mut self, line: impl Into<String>) {
         self.log.push(line.into());
-        if self.log.len() > 500 {
-            let extra = self.log.len() - 400;
+        if self.log.len() > 300 {
+            let extra = self.log.len() - 200;
             self.log.drain(0..extra);
         }
     }
@@ -253,7 +267,7 @@ impl Session {
                 scale: None,
                 start_queue: false,
             };
-            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming)?);
+            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?);
         }
         if let Some(last) = ids.last() {
             self.selected = Some(last.clone());
@@ -276,7 +290,7 @@ impl Session {
                 scale: None,
                 start_queue: false,
             };
-            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming)?);
+            ids.extend(self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?);
         }
         Ok(ids)
     }
@@ -319,6 +333,26 @@ fn drain_inbox(h: &Handle) {
     let mut files: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json")).collect();
     files.sort();
     for path in files {
+        if fsutil::is_symlink(&path) {
+            h.lock(|s| s.push_log(format!("inbox skipped symlink {}", path.display())));
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() == 0 {
+            continue;
+        }
+        if meta.len() > encodecraft_job::MAX_CONTROL_BODY as u64 {
+            h.lock(|s| s.push_log(format!("inbox too large {}", path.display())));
+            let bad = path.with_extension("json.bad");
+            let _ = std::fs::rename(&path, bad);
+            continue;
+        }
+        if !fsutil::is_stable(&path, Duration::from_millis(200)) {
+            continue;
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(_) => continue,
@@ -341,7 +375,7 @@ fn drain_inbox(h: &Handle) {
 pub fn drop_inbox(req: &EnqueueRequest) -> Result<PathBuf, EngineError> {
     paths::ensure_dirs()?;
     let path = paths::inbox_dir().join(format!("{}-{}.json", encodecraft_queue::unix_ms(), encodecraft_queue::new_id("in")));
-    std::fs::write(&path, req.to_vec().map_err(|e| EngineError::Message(e.to_string()))?)?;
+    fsutil::atomic_write(&path, &req.to_vec().map_err(|e| EngineError::Message(e.to_string()))?)?;
     Ok(path)
 }
 
@@ -399,23 +433,30 @@ mod tests {
     use encodecraft_job::{JobSource, ScreenSize};
 
     fn temp_home() -> PathBuf {
-        let p = std::env::temp_dir().join(format!("encodecraft-eng-{}-{}", std::process::id(), encodecraft_queue::unix_ms()));
+        let p = std::env::temp_dir().join(format!(
+            "encodecraft-eng-{}-{:?}-{}",
+            std::process::id(),
+            std::thread::current().id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
         let _ = std::fs::create_dir_all(&p);
         p
     }
 
     #[test]
     fn enqueue_via_handle() {
+        let _guard = paths::lock_home();
         let home = temp_home();
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
+        h.lock(|s| s.settings.output_dir = home.join("out"));
         let ids = h
             .enqueue(EnqueueRequest {
                 schema: 1,
                 source: JobSource::file("/x/ad.mp4"),
                 preset_id: "h264".into(),
                 preset_override: None,
-                output_dir: Some(home.join("out")),
+                output_dir: Some(home.join("out").join("dooh")),
                 naming: Some("{name}_{width}x{height}".into()),
                 sizes: vec![ScreenSize::new("L", 1920, 1080), ScreenSize::new("P", 1080, 1920)],
                 trim: None,
@@ -426,10 +467,24 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let n = h.lock(|s| s.queue.jobs.len());
         assert_eq!(n, 2);
+        let escape = h.enqueue(EnqueueRequest {
+            schema: 1,
+            source: JobSource::file("/x/ad.mp4"),
+            preset_id: "h264".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/etc")),
+            naming: None,
+            sizes: vec![],
+            trim: None,
+            scale: None,
+            start_queue: false,
+        });
+        assert!(escape.is_err());
     }
 
     #[test]
     fn inbox_drop_parses() {
+        let _guard = paths::lock_home();
         let home = temp_home();
         paths::set_home(home.clone());
         let req = EnqueueRequest {

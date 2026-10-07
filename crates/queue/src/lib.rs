@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use encodecraft_ffmpeg::EncodeProgress;
 use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize, Trim};
-use encodecraft_presets::{apply_template, default_template, output_path, ExportPreset, NamingContext, PresetLibrary};
+use encodecraft_presets::{
+    apply_template, constrain_output_dir, default_template, output_path, unique_output_path, ExportPreset, NamingContext, PresetLibrary,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -197,7 +199,14 @@ impl EncodeQueue {
     }
 
     /// Build one or more jobs from an enqueue request.
-    pub fn expand(req: &EnqueueRequest, lib: &PresetLibrary, default_out: &std::path::Path, default_naming: &str) -> Result<Vec<Job>, QueueError> {
+    pub fn expand(
+        req: &EnqueueRequest,
+        lib: &PresetLibrary,
+        default_out: &std::path::Path,
+        default_naming: &str,
+        allow_overwrite: bool,
+        clamp_output: bool,
+    ) -> Result<Vec<Job>, QueueError> {
         req.validate()?;
         let mut preset = lib.get_or_parse(&req.preset_id).map_err(|e| QueueError::Message(e.to_string()))?;
         if let Some(over) = &req.preset_override {
@@ -206,10 +215,15 @@ impl EncodeQueue {
         let trim = req.trim.unwrap_or_default();
         let scale = req.scale.unwrap_or(preset.video.scale);
         let naming = req.naming.as_deref().unwrap_or(default_naming);
-        let out_dir = req.output_dir.clone().unwrap_or_else(|| default_out.to_path_buf());
+        let out_dir = if clamp_output {
+            constrain_output_dir(req.output_dir.as_deref(), default_out).map_err(QueueError::Message)?
+        } else {
+            req.output_dir.clone().unwrap_or_else(|| default_out.to_path_buf())
+        };
         let sizes: Vec<Option<ScreenSize>> = if req.sizes.is_empty() { vec![None] } else { req.sizes.iter().cloned().map(Some).collect() };
 
         let mut jobs = Vec::new();
+        let mut claimed: Vec<PathBuf> = Vec::new();
         for (n, screen) in sizes.into_iter().enumerate() {
             let mut pr = preset.clone();
             pr.video.scale = scale;
@@ -229,7 +243,19 @@ impl EncodeQueue {
                 (n as u32).saturating_add(1),
                 screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""),
             );
-            let output = output_path(&out_dir, naming, &ctx, pr.format.is_sequence());
+            let base = output_path(&out_dir, naming, &ctx, pr.format.is_sequence());
+            let mut output = unique_output_path(base.clone(), allow_overwrite);
+            if !allow_overwrite {
+                let mut n = 2u32;
+                while claimed.iter().any(|p| p == &output) && n < 10_000 {
+                    let parent = base.parent().unwrap_or(std::path::Path::new("."));
+                    let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+                    let ext = base.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                    output = unique_output_path(parent.join(format!("{stem}-{n}{ext}")), false);
+                    n = n.saturating_add(1);
+                }
+            }
+            claimed.push(output.clone());
             jobs.push(Job {
                 id,
                 source: req.source.clone(),
@@ -256,8 +282,10 @@ impl EncodeQueue {
         lib: &PresetLibrary,
         default_out: &std::path::Path,
         default_naming: &str,
+        allow_overwrite: bool,
+        clamp_output: bool,
     ) -> Result<Vec<String>, QueueError> {
-        let jobs = Self::expand(req, lib, default_out, default_naming)?;
+        let jobs = Self::expand(req, lib, default_out, default_naming, allow_overwrite, clamp_output)?;
         let ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
         self.jobs.extend(jobs);
         if req.start_queue {
@@ -310,7 +338,7 @@ mod tests {
     #[test]
     fn one_source_many_sizes() {
         let lib = PresetLibrary::new();
-        let jobs = EncodeQueue::expand(&req_many(), &lib, std::path::Path::new("/out"), "{name}").unwrap();
+        let jobs = EncodeQueue::expand(&req_many(), &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
         assert_eq!(jobs.len(), 4);
         assert!(jobs[0].output.to_string_lossy().contains("hero_1920x1080"));
         assert!(jobs[1].output.to_string_lossy().contains("1080x1920"));
@@ -322,7 +350,7 @@ mod tests {
     fn reorder_and_duplicate() {
         let lib = PresetLibrary::new();
         let mut q = EncodeQueue::new();
-        q.enqueue(&req_many(), &lib, std::path::Path::new("/out"), "{name}").unwrap();
+        q.enqueue(&req_many(), &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
         let first = q.jobs[0].id.clone();
         let last = q.jobs[3].id.clone();
         q.move_job(&first, 1).unwrap();
@@ -333,5 +361,14 @@ mod tests {
         assert_eq!(q.jobs[4].status, JobStatus::Waiting);
         q.remove(&dup).unwrap();
         assert_eq!(q.jobs.len(), 4);
+    }
+
+    #[test]
+    fn rejects_output_dir_escape() {
+        let lib = PresetLibrary::new();
+        let mut req = req_many();
+        req.output_dir = Some(PathBuf::from("/etc"));
+        let err = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap_err();
+        assert!(err.to_string().contains("inside"));
     }
 }

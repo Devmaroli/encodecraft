@@ -63,7 +63,11 @@ impl MediaInfo {
 }
 
 pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
-    let out = Command::new(&ff.ffprobe).args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"]).arg(path).output()?;
+    let out = Command::new(&ff.ffprobe)
+        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+        .arg(super::command::argv_path(path))
+        .stdin(std::process::Stdio::null())
+        .output()?;
     if !out.status.success() {
         return Err(FfmpegError::Probe(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }

@@ -19,3 +19,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 directories = { workspace = true }
+getrandom = "0.2"

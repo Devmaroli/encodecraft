@@ -1,9 +1,19 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::MutexGuard;
 
 use encodecraft_job::{APP_ID, HOME_ENV};
 
 static TEST_HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(test)]
+static TEST_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hold this for the whole test so parallel tests don't share `TEST_HOME`.
+#[cfg(test)]
+pub fn lock_home() -> MutexGuard<'static, ()> {
+    TEST_HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 pub fn set_home(path: PathBuf) {
     if let Ok(mut g) = TEST_HOME.lock() {
@@ -12,13 +22,13 @@ pub fn set_home(path: PathBuf) {
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var(HOME_ENV) {
-        return PathBuf::from(p);
-    }
     if let Ok(g) = TEST_HOME.lock() {
         if let Some(p) = g.clone() {
             return p;
         }
+    }
+    if let Ok(p) = std::env::var(HOME_ENV) {
+        return PathBuf::from(p);
     }
     directories::ProjectDirs::from("dev", "EncodeCraft", "EncodeCraft").map(|p| p.data_dir().to_path_buf()).unwrap_or_else(|| std::env::temp_dir().join(APP_ID))
 }

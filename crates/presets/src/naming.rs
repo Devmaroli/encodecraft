@@ -5,7 +5,7 @@
 //! are replaced so a template cannot escape the output directory.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::ExportPreset;
 
@@ -116,12 +116,107 @@ pub fn sanitize_filename(s: &str) -> String {
             c => out.push(c),
         }
     }
-    let t = out.trim().trim_matches('.');
-    if t.is_empty() {
-        "untitled".into()
-    } else {
-        t.to_string()
+    let t = out.trim().trim_matches('.').trim();
+    let mut t = if t.is_empty() { "untitled".to_string() } else { t.to_string() };
+    if t.starts_with('-') {
+        t.insert(0, '_');
     }
+    if is_windows_reserved(&t) {
+        t = format!("_{t}");
+    }
+    if t.chars().count() > 120 {
+        t = t.chars().take(120).collect();
+        t = t.trim_matches('.').trim().to_string();
+        if t.is_empty() {
+            t = "untitled".into();
+        }
+    }
+    t
+}
+
+fn is_windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    let u = stem.to_ascii_uppercase();
+    matches!(u.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || (u.len() == 4 && u.as_bytes()[3].is_ascii_digit() && (u.starts_with("COM") || u.starts_with("LPT")))
+}
+
+/// Lexical `..` / `.` normalisation (does not touch the filesystem).
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// True if `path` is `root` or a descendant (lexical, component-wise).
+pub fn is_under(path: &Path, root: &Path) -> bool {
+    let path = normalize_path(path);
+    let root = normalize_path(root);
+    path == root || path.starts_with(&root)
+}
+
+/// Client-supplied output folders must stay inside the user's configured output directory.
+pub fn constrain_output_dir(requested: Option<&Path>, configured: &Path) -> Result<PathBuf, String> {
+    let root = if configured.is_absolute() {
+        normalize_path(configured)
+    } else {
+        normalize_path(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(configured))
+    };
+    let Some(req) = requested else {
+        return Ok(root);
+    };
+    if req.as_os_str().is_empty() {
+        return Ok(root);
+    }
+    let candidate = if req.is_absolute() { normalize_path(req) } else { normalize_path(&root.join(req)) };
+    if is_under(&candidate, &root) {
+        Ok(candidate)
+    } else {
+        Err("output_dir must be inside the EncodeCraft output folder".into())
+    }
+}
+
+/// If `path` already exists and overwrites are off, append `-2`, `-3`, …
+pub fn unique_output_path(path: PathBuf, overwrite: bool) -> PathBuf {
+    if overwrite {
+        return path;
+    }
+    let is_seq = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains('%'));
+    let conflict = if is_seq { path.parent().map(|p| p.exists()).unwrap_or(false) } else { path.exists() };
+    if !conflict {
+        return path;
+    }
+    for n in 2..10_000u32 {
+        if is_seq {
+            let seq_dir = match path.parent() {
+                Some(p) => p,
+                None => return path,
+            };
+            let parent = seq_dir.parent().unwrap_or(Path::new("."));
+            let stem = seq_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "seq".into());
+            let new_dir = parent.join(format!("{stem}-{n}"));
+            if !new_dir.exists() {
+                return new_dir.join(path.file_name().unwrap_or_default());
+            }
+        } else {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+            let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+            let cand = parent.join(format!("{stem}-{n}{ext}"));
+            if !cand.exists() {
+                return cand;
+            }
+        }
+    }
+    path
 }
 
 fn local_stamp() -> (String, String) {
@@ -193,5 +288,45 @@ mod tests {
         let ctx = NamingContext::from_preset("clip", &dummy(), 1920, 1080, "j", 1, "");
         let p = output_path(Path::new("/out"), "{name}", &ctx, true);
         assert!(p.to_string_lossy().contains("frame_%06d"));
+    }
+
+    #[test]
+    fn sanitize_blocks_traversal_reserved_and_dash() {
+        assert!(!sanitize_filename("../etc/passwd").contains('/'));
+        assert!(!sanitize_filename("a\\b").contains('\\'));
+        assert!(sanitize_filename("CON").starts_with('_'));
+        assert!(sanitize_filename("nul.txt").to_ascii_uppercase().starts_with("_NUL"));
+        assert!(sanitize_filename("-ss").starts_with('_'));
+        assert_eq!(sanitize_filename("إعلان"), "إعلان");
+        assert!(sanitize_filename("my clip").contains(' '));
+    }
+
+    #[test]
+    fn constrain_rejects_escape() {
+        let root = Path::new("/home/user/EncodeCraft");
+        assert!(constrain_output_dir(Some(Path::new("/etc")), root).is_err());
+        assert!(constrain_output_dir(Some(Path::new("/home/user/EncodeCraft/../secret")), root).is_err());
+        let ok = constrain_output_dir(Some(Path::new("dooh")), root).unwrap();
+        assert!(is_under(&ok, root));
+        let abs = constrain_output_dir(Some(Path::new("/home/user/EncodeCraft/batch")), root).unwrap();
+        assert_eq!(normalize_path(&abs), normalize_path(&root.join("batch")));
+    }
+
+    #[test]
+    fn unique_path_appends_number() {
+        let dir = std::env::temp_dir().join(format!(
+            "ec-unique-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("clip.mp4");
+        std::fs::write(&p, b"x").unwrap();
+        let u = unique_output_path(p.clone(), false);
+        assert_ne!(u, p);
+        assert!(u.file_name().unwrap().to_string_lossy().contains("clip-2"));
+        let same = unique_output_path(p.clone(), true);
+        assert_eq!(same, p);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -48,7 +48,9 @@ Behaviour:
 2. Resolve the project path (`Session`'s open file). If unsaved, error: save first.
 3. Build `EnqueueRequest` with `JobSource::EffectCraft { project, comp, mezzanine: "prores", work_area }`.
 4. Optionally copy current Render Settings size overrides into `sizes` (DOOH pack).
-5. `POST http://127.0.0.1:9878/v1/enqueue`. If that fails, write the JSON to EncodeCraft's inbox
+5. `POST http://127.0.0.1:9878/v1/enqueue` with `Host: 127.0.0.1`, `Content-Type: application/json`,
+   and `X-EncodeCraft-Token` from `encodecraft_job::discover_ipc_token()` (the `ipc-token` file
+   in EncodeCraft's data dir). If that fails, write the JSON to EncodeCraft's inbox
    (see `docs/job-format.md`) and try to spawn `encodecraft`.
 
 ## 3. CLI without patching the UI
@@ -74,8 +76,11 @@ encodecraft-cli serve --port 9878 --start
 ## 4. curl smoke test
 
 ```sh
+TOKEN=$(cat "${ENCODECRAFT_HOME:-$HOME/.local/share/encodecraft}/ipc-token")
 curl -sS -X POST http://127.0.0.1:9878/v1/enqueue \
   -H 'Content-Type: application/json' \
+  -H "X-EncodeCraft-Token: $TOKEN" \
+  -H 'Host: 127.0.0.1' \
   -d '{"schema":1,"source":{"kind":"file","path":"/abs/hero.mov"},"preset_id":"system.h264-mp4","start_queue":true}'
 ```
 

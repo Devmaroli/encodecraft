@@ -14,11 +14,11 @@ mod probe;
 mod progress;
 mod run;
 
-pub use command::{build_encode_plan, even, EncodePlan, PlanInput};
+pub use command::{argv_path, build_encode_plan, even, EncodePlan, PlanInput};
 pub use detect::{find_effectcraft_cli, find_ffmpeg, find_ffmpeg_at, sidecar_ffmpeg, Ffmpeg};
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use progress::{parse_progress_line, EncodeProgress};
-pub use run::{encode, encode_path, thumbnail_png, EncodeResult, EncodeStop};
+pub use run::{encode, encode_path, encode_with_stall, partial_output, thumbnail_png, EncodeResult, EncodeStop, DEFAULT_STALL_SECS};
 
 use encodecraft_job::JobSource;
 use std::path::PathBuf;

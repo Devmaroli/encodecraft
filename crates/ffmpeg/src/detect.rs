@@ -29,11 +29,11 @@ pub fn find_ffmpeg() -> Result<Ffmpeg, FfmpegError> {
 /// then common install locations.
 pub fn find_ffmpeg_at(override_path: Option<&Path>) -> Result<Ffmpeg, FfmpegError> {
     if let Some(p) = override_path {
-        if is_exe(p) {
+        if p.is_absolute() && is_exe(p) {
             return ffmpeg_from(p.to_path_buf());
         }
         let nested = p.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
-        if is_exe(&nested) {
+        if p.is_absolute() && is_exe(&nested) {
             return ffmpeg_from(nested);
         }
     }
@@ -67,6 +67,7 @@ fn sidecar_tool(name: &str) -> Vec<PathBuf> {
 }
 
 fn ffmpeg_from(ffmpeg: PathBuf) -> Result<Ffmpeg, FfmpegError> {
+    let ffmpeg = std::fs::canonicalize(&ffmpeg).unwrap_or(ffmpeg);
     let probe_name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
     let ffprobe = ffmpeg
         .parent()
@@ -74,6 +75,7 @@ fn ffmpeg_from(ffmpeg: PathBuf) -> Result<Ffmpeg, FfmpegError> {
         .filter(|p| p.is_file())
         .or_else(|| locate_tool("ffprobe", "FFPROBE_PATH", &ffprobe_candidates()).ok())
         .unwrap_or_else(|| ffmpeg.clone());
+    let ffprobe = std::fs::canonicalize(&ffprobe).unwrap_or(ffprobe);
     let version = read_version(&ffmpeg).unwrap_or_else(|_| "ffmpeg".into());
     Ok(Ffmpeg { ffmpeg, ffprobe, version })
 }
@@ -85,11 +87,12 @@ pub fn find_effectcraft_cli() -> Result<PathBuf, FfmpegError> {
 fn locate_tool(name: &str, env_key: &str, extra: &[PathBuf]) -> Result<PathBuf, FfmpegError> {
     if let Ok(p) = std::env::var(env_key) {
         let path = PathBuf::from(p);
-        if is_exe(&path) {
+        // Relative env values would resolve against the process cwd (a planting trick).
+        if path.is_absolute() && is_exe(&path) {
             return Ok(path);
         }
         let nested = path.join(if cfg!(windows) { format!("{name}.exe") } else { name.into() });
-        if is_exe(&nested) {
+        if path.is_absolute() && is_exe(&nested) {
             return Ok(nested);
         }
     }
@@ -97,7 +100,7 @@ fn locate_tool(name: &str, env_key: &str, extra: &[PathBuf]) -> Result<PathBuf, 
         return Ok(p);
     }
     for c in extra {
-        if is_exe(c) {
+        if c.is_absolute() && is_exe(c) {
             return Ok(c.clone());
         }
     }
@@ -108,6 +111,9 @@ fn which(name: &str) -> Option<PathBuf> {
     let exe = if cfg!(windows) && !name.ends_with(".exe") { format!("{name}.exe") } else { name.to_string() };
     let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {
+        if dir.as_os_str().is_empty() || dir == Path::new(".") || !dir.is_absolute() {
+            continue;
+        }
         let p = dir.join(&exe);
         if is_exe(&p) {
             return Some(p);
@@ -219,6 +225,20 @@ mod tests {
             } else {
                 assert_eq!(name, "ffmpeg", "{p:?}");
             }
+        }
+    }
+
+    #[test]
+    fn which_skips_dot_and_relative_path() {
+        // Plant a dummy next to the test binary; discovery must not pick cwd.
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap();
+        let plant = dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+        // Even if a file exists here, `which` only walks absolute PATH entries, never `.`.
+        let found = super::which("ffmpeg");
+        if let Some(p) = found {
+            assert!(p.is_absolute());
+            assert_ne!(p, plant, "must not use a binary planted next to the test exe via cwd");
         }
     }
 }

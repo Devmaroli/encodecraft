@@ -1,9 +1,10 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use super::command::{build_encode_plan, PlanInput};
 use super::probe::{self, MediaInfo};
@@ -36,6 +37,8 @@ pub struct EncodeResult {
     pub progress: EncodeProgress,
 }
 
+pub const DEFAULT_STALL_SECS: u64 = 120;
+
 pub fn encode(
     ff: &Ffmpeg,
     source: &Path,
@@ -44,27 +47,49 @@ pub fn encode(
     trim: Trim,
     media: Option<&MediaInfo>,
     stop: &EncodeStop,
+    on_progress: impl FnMut(&EncodeProgress),
+    on_log: impl FnMut(&str),
+) -> Result<EncodeResult, FfmpegError> {
+    encode_with_stall(ff, source, output, preset, trim, media, stop, DEFAULT_STALL_SECS, on_progress, on_log)
+}
+
+pub fn encode_with_stall(
+    ff: &Ffmpeg,
+    source: &Path,
+    output: PathBuf,
+    preset: &ExportPreset,
+    trim: Trim,
+    media: Option<&MediaInfo>,
+    stop: &EncodeStop,
+    stall_secs: u64,
     mut on_progress: impl FnMut(&EncodeProgress),
     mut on_log: impl FnMut(&str),
 ) -> Result<EncodeResult, FfmpegError> {
-    if let Some(parent) = output.parent() {
+    if !source.is_file() {
+        return Err(FfmpegError::Message(format!("source is missing: {}", source.display())));
+    }
+    let final_out = output;
+    let tmp_out = partial_output(&final_out);
+    if let Some(parent) = tmp_out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let plan = build_encode_plan(PlanInput { source, output: output.clone(), preset, trim, media });
+    let plan = build_encode_plan(PlanInput { source, output: tmp_out.clone(), preset, trim, media });
     on_log(&plan.display_cmdline(&ff.ffmpeg));
 
     let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));
 
-    let mut child = Command::new(&ff.ffmpeg).args(&plan.args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            FfmpegError::Missing
-        } else {
-            FfmpegError::Io(e)
-        }
-    })?;
+    let mut child = ChildGuard {
+        child: Some(Command::new(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                FfmpegError::Missing
+            } else {
+                FfmpegError::Io(e)
+            }
+        })?),
+    };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.stdout();
+    let stderr = child.stderr();
     let (tx, rx) = std::sync::mpsc::channel::<Msg>();
 
     if let Some(out) = stdout {
@@ -104,41 +129,148 @@ pub fn encode(
     let mut progress = EncodeProgress::default();
     let mut log = String::new();
     let mut cancelled = false;
+    let mut stalled = false;
+    let stall_for = Duration::from_secs(stall_secs.max(15));
+    let mut last_activity = Instant::now();
     loop {
         if stop.is_requested() {
             cancelled = true;
-            let _ = child.kill();
+            child.kill();
             break;
         }
-        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+        match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Msg::Out(line)) => {
+                last_activity = Instant::now();
                 if parse_progress_line(&line, &mut progress, duration) {
                     on_progress(&progress);
                 }
             }
             Ok(Msg::Err(line)) => {
+                last_activity = Instant::now();
                 if !line.is_empty() {
                     log.push_str(&line);
                     log.push('\n');
                     on_log(&line);
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if last_activity.elapsed() > stall_for {
+                    stalled = true;
+                    child.kill();
+                    break;
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     let status = child.wait()?;
     if cancelled || stop.is_requested() {
+        let _ = remove_partial(&tmp_out);
         return Err(FfmpegError::Message("stopped".into()));
     }
-    if !status.success() {
-        let code = status.code().unwrap_or(-1);
-        return Err(FfmpegError::Encode { status: code, stderr: tail(&log, 4000) });
+    if stalled {
+        let _ = remove_partial(&tmp_out);
+        return Err(FfmpegError::Message(format!("ffmpeg stalled (no output for {}s)", stall_for.as_secs())));
     }
+    if !status.success() {
+        let _ = remove_partial(&tmp_out);
+        let code = status.code().unwrap_or(-1);
+        let err = tail(&log, 4000);
+        if looks_like_disk_full(&err) {
+            return Err(FfmpegError::Message("disk full".into()));
+        }
+        return Err(FfmpegError::Encode { status: code, stderr: err });
+    }
+    if let Some(parent) = final_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    replace_file(&tmp_out, &final_out)?;
     progress.done = true;
     progress.percent = 100.0;
     on_progress(&progress);
-    Ok(EncodeResult { output, log, progress })
+    Ok(EncodeResult { output: final_out, log, progress })
+}
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut().and_then(|c| c.stdout.take())
+    }
+    fn stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|c| c.stderr.take())
+    }
+    fn kill(&mut self) {
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+        }
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self.child.as_mut() {
+            Some(c) => {
+                let st = c.wait()?;
+                self.child = None;
+                Ok(st)
+            }
+            None => Err(std::io::Error::new(std::io::ErrorKind::Other, "no child")),
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+pub fn partial_output(final_out: &Path) -> PathBuf {
+    let name = final_out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+    if name.contains('%') {
+        let seq_dir = final_out.parent().unwrap_or(Path::new("."));
+        let parent = seq_dir.parent().unwrap_or(Path::new("."));
+        let stem = seq_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "seq".into());
+        return parent.join(format!(".{stem}.encodecraft-partial")).join(name);
+    }
+    match final_out.parent() {
+        Some(dir) => dir.join(format!(".{name}.encodecraft-partial")),
+        None => PathBuf::from(format!(".{name}.encodecraft-partial")),
+    }
+}
+
+fn remove_partial(tmp: &Path) -> std::io::Result<()> {
+    if tmp.to_string_lossy().contains('%') {
+        if let Some(dir) = tmp.parent() {
+            return std::fs::remove_dir_all(dir);
+        }
+    }
+    if tmp.is_dir() {
+        std::fs::remove_dir_all(tmp)
+    } else {
+        std::fs::remove_file(tmp)
+    }
+}
+
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(to);
+            if from.is_dir() {
+                let _ = std::fs::remove_dir_all(to);
+            }
+            std::fs::rename(from, to)
+        }
+    }
+}
+
+fn looks_like_disk_full(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("no space left") || s.contains("disk full") || s.contains("not enough space")
 }
 
 enum Msg {
@@ -162,7 +294,13 @@ pub fn thumbnail_png(ff: &Ffmpeg, source: &Path, dest: &Path, at_sec: f64) -> Re
     if at_sec > 0.05 {
         cmd.args(["-ss", &format!("{at_sec:.3}")]);
     }
-    let out = cmd.args(["-i"]).arg(source).args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(dest).output()?;
+    let out = cmd
+        .args(["-i"])
+        .arg(super::command::argv_path(source))
+        .args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"])
+        .arg(super::command::argv_path(dest))
+        .stdin(Stdio::null())
+        .output()?;
     if !out.status.success() {
         return Err(FfmpegError::Probe(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
@@ -195,5 +333,20 @@ mod tests {
         assert!(!s.is_requested());
         c.request();
         assert!(s.is_requested());
+    }
+
+    #[test]
+    fn partial_output_is_beside_final() {
+        let p = PathBuf::from("/out/clip.mp4");
+        let t = partial_output(&p);
+        assert!(t.file_name().unwrap().to_string_lossy().contains("encodecraft-partial"));
+        assert_eq!(t.parent(), p.parent());
+        assert_ne!(t, p);
+    }
+
+    #[test]
+    fn disk_full_sniff() {
+        assert!(looks_like_disk_full("os error 28: No space left on device"));
+        assert!(!looks_like_disk_full("invalid argument"));
     }
 }

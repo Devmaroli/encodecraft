@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use encodecraft_engine::{drop_inbox, fallback_naming, fallback_output, read_lock_port, write_lock, Handle};
 use encodecraft_ffmpeg::{build_encode_plan, encode_path, find_ffmpeg, probe, EncodeStop, Ffmpeg, PlanInput};
-use encodecraft_job::{EnqueueRequest, JobSource, ScaleMode, DEFAULT_CONTROL_PORT, PORT_ENV, PRODUCT};
+use encodecraft_job::{EnqueueRequest, JobSource, ScaleMode, DEFAULT_CONTROL_PORT, PORT_ENV, PRODUCT, TOKEN_HEADER};
 use encodecraft_presets::{parse_size_list, PresetLibrary};
 use encodecraft_queue::JobStatus;
 
@@ -210,7 +210,7 @@ fn serve_cmd(args: &[String]) -> Result<(), String> {
     });
     let srv = handle.start_ipc(port).map_err(|e| e.to_string())?;
     let _ = write_lock(srv.port);
-    eprintln!("{PRODUCT} headless on 127.0.0.1:{}  (POST /v1/enqueue)", srv.port);
+    eprintln!("{PRODUCT} headless on 127.0.0.1:{}  (POST /v1/enqueue, header {TOKEN_HEADER})", srv.port);
     if let Some(secs) = opt(args, "--timeout").and_then(|s| s.parse::<u64>().ok()) {
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_secs(secs) {
@@ -228,6 +228,7 @@ fn serve_cmd(args: &[String]) -> Result<(), String> {
             thread::sleep(Duration::from_secs(60));
         }
     }
+    handle.stop_all();
     handle.persist();
     encodecraft_engine::clear_lock();
     Ok(())

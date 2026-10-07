@@ -1,18 +1,26 @@
-//! Local HTTP + JSON-lines control server on 127.0.0.1.
+//! Local HTTP + JSON-lines control server on **127.0.0.1 only**.
 //!
-//! EffectCraft (and `encodecraft-cli enqueue`) POST `/v1/enqueue` with an [`EnqueueRequest`].
-//! JSON-lines `{method, params}` is accepted on the same port so the protocol feels like
-//! EffectCraft's control channel.
+//! Authentication: a per-install token in the user data dir (`ipc-token`), also readable via
+//! `ENCODECRAFT_TOKEN`. HTTP clients send `X-EncodeCraft-Token`. JSON-lines clients put
+//! `"token"` on each request.
+//!
+//! Browser-shaped requests are rejected (Host, Origin, CORS). There is no
+//! `Access-Control-Allow-Origin` header.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use encodecraft_job::{ControlReply, ControlRequest, EnqueueReply, EnqueueRequest, DEFAULT_CONTROL_PORT};
-use serde_json::json;
+use encodecraft_job::{ControlReply, ControlRequest, EnqueueReply, EnqueueRequest, DEFAULT_CONTROL_PORT, MAX_CONTROL_BODY, PRODUCT, TOKEN_HEADER};
 
-use crate::{EngineError, Handle};
+use crate::{token, EngineError, Handle};
+
+const MAX_HEADERS: usize = 64;
+const MAX_HEADER_LINE: usize = 8192;
+const MAX_CONNS: usize = 16;
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct IpcServer {
     pub port: u16,
@@ -23,26 +31,37 @@ impl IpcServer {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         listener.set_nonblocking(false)?;
         let actual = listener.local_addr()?.port();
+        let live = std::sync::Arc::new(AtomicUsize::new(0));
         thread::Builder::new()
             .name("encodecraft-ipc".into())
             .spawn(move || {
                 for conn in listener.incoming() {
                     match conn {
                         Ok(s) => {
+                            if live.load(Ordering::SeqCst) >= MAX_CONNS {
+                                let _ = write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
+                                continue;
+                            }
+                            live.fetch_add(1, Ordering::SeqCst);
                             let h = handle.clone();
-                            thread::spawn(move || handle_conn(s, h));
+                            let live = live.clone();
+                            let _ = thread::Builder::new().name("encodecraft-ipc-conn".into()).spawn(move || {
+                                handle_conn(s, h);
+                                live.fetch_sub(1, Ordering::SeqCst);
+                            });
                         }
                         Err(_) => break,
                     }
                 }
             })
-            .map_err(|e| EngineError::Io(e))?;
+            .map_err(EngineError::Io)?;
         Ok(IpcServer { port: actual })
     }
 }
 
 fn handle_conn(stream: TcpStream, handle: Handle) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut peek = [0u8; 8];
     let n = match stream.peek(&mut peek) {
         Ok(n) => n,
@@ -53,19 +72,30 @@ fn handle_conn(stream: TcpStream, handle: Handle) {
         handle_http(stream, handle);
         return;
     }
+    let expected = handle.lock(|s| s.ipc_token.clone());
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
+            Ok(n) if n > MAX_CONTROL_BODY => break,
             Ok(_) => {
                 let t = line.trim();
                 if t.is_empty() {
                     continue;
                 }
+                if t.len() > MAX_CONTROL_BODY {
+                    break;
+                }
                 let reply = match serde_json::from_str::<ControlRequest>(t) {
-                    Ok(req) => handle.execute_json(req),
+                    Ok(req) => {
+                        if !token::equals(req.token.as_deref().unwrap_or(""), &expected) {
+                            ControlReply { id: req.id, ok: false, result: None, error: Some("unauthorized".into()) }
+                        } else {
+                            handle.execute_json(req)
+                        }
+                    }
                     Err(e) => ControlReply { id: 0, ok: false, result: None, error: Some(format!("bad json: {e}")) },
                 };
                 let mut s = reader.get_mut();
@@ -88,22 +118,45 @@ fn write_line(s: &mut TcpStream, reply: &ControlReply) -> std::io::Result<()> {
 fn handle_http(mut stream: TcpStream, handle: Handle) {
     let mut reader = BufReader::new(&mut stream);
     let mut start = String::new();
-    if reader.read_line(&mut start).is_err() {
+    if reader.read_line(&mut start).is_err() || start.len() > MAX_HEADER_LINE {
         return;
     }
+    let mut host = String::new();
+    let mut origin: Option<String> = None;
+    let mut content_type = String::new();
     let mut content_length = 0usize;
+    let mut req_token = String::new();
+    let mut sec_fetch_site = String::new();
+    let mut n_headers = 0usize;
     loop {
+        if n_headers >= MAX_HEADERS {
+            let _ = write_http(&mut stream, 431, r#"{"ok":false,"error":"too many headers"}"#);
+            return;
+        }
+        n_headers += 1;
         let mut h = String::new();
-        if reader.read_line(&mut h).is_err() {
+        if reader.read_line(&mut h).is_err() || h.len() > MAX_HEADER_LINE {
             return;
         }
         if h == "\r\n" || h == "\n" || h.is_empty() {
             break;
         }
-        let lower = h.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0).min(4 * 1024 * 1024);
+        let (name, value) = split_header(&h);
+        match name.as_str() {
+            "host" => host = value,
+            "origin" => origin = Some(value),
+            "content-type" => content_type = value,
+            "content-length" => content_length = value.parse().unwrap_or(0),
+            "x-encodecraft-token" | "authorization" => {
+                req_token = value.strip_prefix("Bearer ").unwrap_or(&value).trim().to_string();
+            }
+            "sec-fetch-site" => sec_fetch_site = value,
+            _ => {}
         }
+    }
+    if content_length > MAX_CONTROL_BODY {
+        let _ = write_http(&mut stream, 413, r#"{"ok":false,"error":"payload too large"}"#);
+        return;
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 && reader.read_exact(&mut body).is_err() {
@@ -112,10 +165,37 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
     }
     let parts: Vec<&str> = start.split_whitespace().collect();
     let method = parts.first().copied().unwrap_or("");
-    let path = parts.get(1).copied().unwrap_or("/");
+    let path = parts.get(1).copied().unwrap_or("/").split('?').next().unwrap_or("/");
 
-    let (status, payload) = if method == "GET" && (path == "/health" || path == "/v1/health") {
-        (200, json!({"ok": true, "product": encodecraft_job::PRODUCT}).to_string())
+    if !host_ok(&host) {
+        let _ = write_http(&mut stream, 403, r#"{"ok":false,"error":"bad host"}"#);
+        return;
+    }
+    if let Some(ref o) = origin {
+        if !origin_ok(o) {
+            let _ = write_http(&mut stream, 403, r#"{"ok":false,"error":"browser origin rejected"}"#);
+            return;
+        }
+    }
+    if !sec_fetch_site.is_empty() && sec_fetch_site != "none" && sec_fetch_site != "same-origin" {
+        let _ = write_http(&mut stream, 403, r#"{"ok":false,"error":"cross-site request rejected"}"#);
+        return;
+    }
+
+    let expected = handle.lock(|s| s.ipc_token.clone());
+    let is_health = method == "GET" && (path == "/health" || path == "/v1/health");
+    if !is_health && !token::equals(&req_token, &expected) {
+        let _ = write_http(&mut stream, 401, r#"{"ok":false,"error":"unauthorized"}"#);
+        return;
+    }
+
+    if method == "POST" && !content_type.to_ascii_lowercase().starts_with("application/json") {
+        let _ = write_http(&mut stream, 415, r#"{"ok":false,"error":"Content-Type must be application/json"}"#);
+        return;
+    }
+
+    let (status, payload) = if is_health {
+        (200, serde_json::json!({"ok": true, "product": PRODUCT}).to_string())
     } else if method == "POST" && (path == "/v1/enqueue" || path == "/enqueue") {
         match EnqueueRequest::from_json(&body) {
             Ok(req) => match handle.enqueue(req) {
@@ -130,28 +210,56 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
                 let r = handle.execute_json(req);
                 (200, serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
             }
-            Err(e) => (400, json!({"ok": false, "error": e.to_string()}).to_string()),
+            Err(e) => (400, serde_json::json!({"ok": false, "error": e.to_string()}).to_string()),
         }
     } else if method == "GET" && path == "/v1/queue" {
-        match handle.dispatch("queue.list", &json!({})) {
+        match handle.dispatch("queue.list", &serde_json::json!({})) {
             Ok(v) => (200, v.to_string()),
-            Err(e) => (500, json!({"ok":false,"error": e.to_string()}).to_string()),
+            Err(e) => (500, serde_json::json!({"ok":false,"error": e.to_string()}).to_string()),
         }
     } else {
-        (404, json!({"ok":false,"error":"not found"}).to_string())
+        (404, serde_json::json!({"ok":false,"error":"not found"}).to_string())
     };
     let _ = write_http(&mut stream, status, &payload);
+}
+
+fn split_header(line: &str) -> (String, String) {
+    let line = line.trim_end_matches(['\r', '\n']);
+    match line.split_once(':') {
+        Some((n, v)) => (n.trim().to_ascii_lowercase(), v.trim().to_string()),
+        None => (String::new(), String::new()),
+    }
+}
+
+fn host_ok(host: &str) -> bool {
+    let h = host.trim().trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    let name = h.split(':').next().unwrap_or("");
+    matches!(name, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn origin_ok(origin: &str) -> bool {
+    let o = origin.trim().to_ascii_lowercase();
+    if o.is_empty() || o == "null" {
+        return false;
+    }
+    o.starts_with("http://127.0.0.1") || o.starts_with("http://localhost") || o.starts_with("http://[::1]")
 }
 
 fn write_http(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -159,10 +267,17 @@ fn write_http(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Resul
     stream.flush()
 }
 
+fn write_http_raw(stream: &TcpStream, status: u16, body: &str) {
+    if let Ok(mut s) = stream.try_clone() {
+        let _ = write_http(&mut s, status, body);
+    }
+}
+
 /// POST an enqueue request to a running encoder. Returns the job ids.
 pub fn post_enqueue(port: u16, req: &EnqueueRequest) -> Result<Vec<String>, EngineError> {
     let body = req.to_vec().map_err(|e| EngineError::Message(e.to_string()))?;
-    let resp = http_post(port, "/v1/enqueue", &body)?;
+    let tok = token::current();
+    let resp = http_post(port, "/v1/enqueue", &body, tok.as_deref())?;
     let reply: EnqueueReply = serde_json::from_str(&resp).map_err(|e| EngineError::Message(e.to_string()))?;
     if reply.ok {
         Ok(reply.ids)
@@ -179,13 +294,21 @@ pub fn try_connect(port: u16) -> bool {
     .is_ok()
 }
 
-pub fn http_post(port: u16, path: &str, body: &[u8]) -> Result<String, EngineError> {
+pub fn http_post(port: u16, path: &str, body: &[u8], tok: Option<&str>) -> Result<String, EngineError> {
     let mut s = TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().map_err(|e| EngineError::Message(format!("{e}")))?, Duration::from_secs(2))?;
-    let req =
-        format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let _ = s.set_read_timeout(Some(IO_TIMEOUT));
+    let auth = tok.map(|t| format!("{TOKEN_HEADER}: {t}\r\n")).unwrap_or_default();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     s.write_all(req.as_bytes())?;
     s.write_all(body)?;
     s.flush()?;
+    read_http_body(s)
+}
+
+fn read_http_body(s: TcpStream) -> Result<String, EngineError> {
     let mut r = BufReader::new(s);
     let mut status = String::new();
     r.read_line(&mut status)?;
@@ -198,7 +321,7 @@ pub fn http_post(port: u16, path: &str, body: &[u8]) -> Result<String, EngineErr
         }
         let lower = h.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
-            len = v.trim().parse().unwrap_or(0).min(8 * 1024 * 1024);
+            len = v.trim().parse().unwrap_or(0).min(MAX_CONTROL_BODY);
         }
     }
     let mut buf = vec![0u8; len];
@@ -219,26 +342,40 @@ pub fn default_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use encodecraft_job::{JobSource, ScreenSize};
+    use encodecraft_job::{JobSource, ScreenSize, TOKEN_HEADER};
+    use std::io::{Read, Write};
+
+    fn boot() -> (Handle, IpcServer, String, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::paths::lock_home();
+        let home = std::env::temp_dir().join(format!(
+            "encodecraft-ipc-{}-{:?}-{}",
+            std::process::id(),
+            std::thread::current().id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        crate::paths::set_home(home);
+        let h = crate::Handle::open_core().unwrap();
+        let tok = h.lock(|s| s.ipc_token.clone());
+        let srv = IpcServer::bind(0, h.clone()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        (h, srv, tok, guard)
+    }
+
+    fn raw(port: u16, req: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        let mut b = String::new();
+        s.read_to_string(&mut b).unwrap();
+        b
+    }
 
     #[test]
     fn http_enqueue_and_health() {
-        let home = std::env::temp_dir().join(format!("encodecraft-ipc-{}-{}", std::process::id(), encodecraft_queue::unix_ms()));
-        crate::paths::set_home(home);
-        let h = crate::Handle::open_core().unwrap();
-        let srv = IpcServer::bind(0, h.clone()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        let (h, srv, _, _guard) = boot();
         assert!(try_connect(srv.port));
-        let health = super::http_post(srv.port, "/v1/health", b"").unwrap_or_else(|_| {
-            // GET not POST — use a raw GET
-            use std::io::{Read, Write};
-            let mut s = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
-            s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
-            let mut b = String::new();
-            s.read_to_string(&mut b).unwrap();
-            b
-        });
+        let health = raw(srv.port, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
         assert!(health.contains("EncodeCraft") || health.contains("ok"));
+        assert!(!health.to_ascii_lowercase().contains("access-control-allow-origin"));
         let req = EnqueueRequest {
             schema: 1,
             source: JobSource::file("/tmp/dooh.mp4"),
@@ -255,5 +392,57 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let n = h.lock(|s| s.queue.jobs.len());
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn rejects_missing_token_and_bad_host_and_origin() {
+        let (_h, srv, tok, _guard) = boot();
+        let body = r#"{"schema":1,"source":{"kind":"file","path":"/tmp/a.mp4"},"preset_id":"system.h264-mp4"}"#;
+        let no_tok = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(no_tok.contains("401") || no_tok.contains("unauthorized"));
+        let bad_host = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(bad_host.contains("403") || bad_host.contains("bad host"));
+        let csrf = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(csrf.contains("403") || csrf.contains("origin"));
+        let rebind = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://attacker.test\r\nSec-Fetch-Site: cross-site\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(rebind.contains("403"));
+    }
+
+    #[test]
+    fn rejects_future_schema_over_http() {
+        let (_h, srv, tok, _guard) = boot();
+        let body = r#"{"schema":99,"source":{"kind":"file","path":"/tmp/a.mp4"},"preset_id":"system.h264-mp4"}"#;
+        let resp = raw(
+            srv.port,
+            &format!(
+                "POST /v1/enqueue HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(resp.contains("schema") || resp.contains("400"));
     }
 }

@@ -9,8 +9,19 @@ fn main() {
         }
         "test" => run("cargo", &["test", "--workspace"]),
         "fmt" => run("cargo", &["fmt", "--all"]),
+        "windows" => {
+            let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/build-windows.sh");
+            let st = std::process::Command::new("bash")
+                .arg(&script)
+                .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
+                .status()
+                .unwrap_or_else(|e| panic!("build-windows.sh: {e}"));
+            if !st.success() {
+                std::process::exit(st.code().unwrap_or(1));
+            }
+        }
         _ => {
-            eprintln!("xtask ci | test | fmt");
+            eprintln!("xtask ci | test | fmt | windows");
         }
     }
 }

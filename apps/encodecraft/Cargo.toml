@@ -13,6 +13,10 @@ workspace = true
 encodecraft-job = { workspace = true }
 encodecraft-engine = { workspace = true }
 encodecraft-ui-egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { workspace = true, features = ["default_fonts", "glow"] }
 env_logger = { workspace = true }
 log = { workspace = true }
+rfd = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }

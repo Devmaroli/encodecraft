@@ -884,6 +884,7 @@ dependencies = [
  "encodecraft-ui-egui",
  "env_logger",
  "log",
+ "rfd",
 ]
 
 [[package]]

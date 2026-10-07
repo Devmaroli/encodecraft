@@ -35,11 +35,19 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 - FFmpeg **and** ffprobe on `PATH`, or `FFMPEG_PATH`
 - Linux: a working display for the GUI (X11 or Wayland). The CLI encodes without a window.
 
-### FFmpeg on Windows
+### Windows (no Rust)
 
-1. **winget** (recommended): `winget install Gyan.FFmpeg`
-2. Or download a full build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), unzip, and add the `bin` folder to PATH.
-3. Or set `FFMPEG_PATH` to `ffmpeg.exe` (EncodeCraft also looks in `C:\ffmpeg\bin` and Program Files).
+A ready-to-run 64-bit zip (`encodecraft-*-windows-x64.zip`) ships `encodecraft.exe`, `encodecraft-cli.exe`, and a bundled `ffmpeg.exe` / `ffprobe.exe`. Unzip the folder and double-click `encodecraft.exe`. See `README-Windows.txt` inside the zip (SmartScreen: More info → Run anyway).
+
+To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`.
+
+### FFmpeg on Windows (if you are compiling yourself)
+
+EncodeCraft looks for `ffmpeg.exe` **next to its own .exe first**, then `FFMPEG_PATH`, then PATH.
+
+1. **winget**: `winget install Gyan.FFmpeg`
+2. Or a build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+3. Or set `FFMPEG_PATH` to `ffmpeg.exe`
 
 macOS: `brew install ffmpeg`  
 Linux: `sudo apt install ffmpeg` (Debian/Ubuntu) or `sudo dnf install ffmpeg`

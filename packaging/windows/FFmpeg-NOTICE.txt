@@ -1,0 +1,19 @@
+FFmpeg (bundled)
+================
+
+This folder includes ffmpeg.exe and ffprobe.exe from a Gyan.dev “essentials”
+Windows build of FFmpeg:
+
+  https://www.gyan.dev/ffmpeg/builds/
+
+EncodeCraft does not link against FFmpeg. It runs those programs as separate
+executables sitting next to encodecraft.exe.
+
+FFmpeg is licensed under the GNU GPL (and some parts LGPL). See
+FFmpeg-LICENSE.txt in this folder (copied from the FFmpeg build) and:
+
+  https://ffmpeg.org/legal.html
+
+FFmpeg source code: https://ffmpeg.org/download.html
+The exact Gyan essentials zip used to pack this release is listed in
+FFmpeg-README.txt when that file is present.

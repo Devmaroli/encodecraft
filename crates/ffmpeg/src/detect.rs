@@ -23,6 +23,10 @@ pub fn find_ffmpeg() -> Result<Ffmpeg, FfmpegError> {
 }
 
 /// `override_path` is Settings ▸ FFmpeg path (file or directory).
+///
+/// Search order: that override, then **the folder next to this executable** (so a Windows zip
+/// with `ffmpeg.exe` beside `encodecraft.exe` just works), then `FFMPEG_PATH`, then `PATH`,
+/// then common install locations.
 pub fn find_ffmpeg_at(override_path: Option<&Path>) -> Result<Ffmpeg, FfmpegError> {
     if let Some(p) = override_path {
         if is_exe(p) {
@@ -33,8 +37,33 @@ pub fn find_ffmpeg_at(override_path: Option<&Path>) -> Result<Ffmpeg, FfmpegErro
             return ffmpeg_from(nested);
         }
     }
+    for p in sidecar_ffmpeg() {
+        if is_exe(&p) {
+            return ffmpeg_from(p);
+        }
+    }
     let ffmpeg = locate_tool("ffmpeg", FFMPEG_ENV, &ffmpeg_candidates())?;
     ffmpeg_from(ffmpeg)
+}
+
+/// `ffmpeg` / `ffmpeg.exe` sitting next to the running binary, or in `ffmpeg/` or `bin/` beside it.
+pub fn sidecar_ffmpeg() -> Vec<PathBuf> {
+    sidecar_tool("ffmpeg")
+}
+
+fn sidecar_tool(name: &str) -> Vec<PathBuf> {
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let mut v = Vec::new();
+    let Ok(exe) = std::env::current_exe() else {
+        return v;
+    };
+    let Some(dir) = exe.parent() else {
+        return v;
+    };
+    v.push(dir.join(&file));
+    v.push(dir.join("ffmpeg").join(&file));
+    v.push(dir.join("bin").join(&file));
+    v
 }
 
 fn ffmpeg_from(ffmpeg: PathBuf) -> Result<Ffmpeg, FfmpegError> {
@@ -171,12 +200,25 @@ mod tests {
         let msg = FfmpegError::Missing.to_string();
         assert!(msg.contains("winget"));
         assert!(msg.contains("FFMPEG_PATH"));
+        assert!(msg.contains("same folder"));
     }
 
     #[test]
     fn ffmpeg_candidates_are_absolute() {
         for p in ffmpeg_candidates() {
             assert!(p.is_absolute() || p.starts_with("C:"), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn sidecar_names_match_platform() {
+        for p in sidecar_ffmpeg() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if cfg!(windows) {
+                assert_eq!(name, "ffmpeg.exe", "{p:?}");
+            } else {
+                assert_eq!(name, "ffmpeg", "{p:?}");
+            }
         }
     }
 }

@@ -16,9 +16,12 @@ encodecraft-ffmpeg = { workspace = true }
 encodecraft-queue = { workspace = true }
 encodecraft-engine = { workspace = true }
 egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { workspace = true, features = ["default_fonts", "glow"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
 image = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "glow", "x11", "wayland"] }

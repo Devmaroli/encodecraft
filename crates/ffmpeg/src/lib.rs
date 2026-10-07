@@ -1,9 +1,10 @@
 //! FFmpeg as an **external binary** (never linked). EffectCraft encodes in pure Rust; EncodeCraft
 //! shells out to FFmpeg because that is the right tool for a Media Encoder-style delivery queue.
 //!
-//! Discovery looks at `FFMPEG_PATH`, `PATH`, and common Windows/macOS/Linux install locations.
-//! If nothing is found, callers get a [`FfmpegError::Missing`] with install hints — the UI shows
-//! that instead of crashing.
+//! Discovery order: Settings override, **the folder next to the running executable**
+//! (`ffmpeg.exe` beside `encodecraft.exe` on the Windows zip), `FFMPEG_PATH`, `PATH`, then
+//! common install locations. If nothing is found, callers get a [`FfmpegError::Missing`]
+//! with install hints — the UI shows that instead of crashing.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -14,7 +15,7 @@ mod progress;
 mod run;
 
 pub use command::{build_encode_plan, even, EncodePlan, PlanInput};
-pub use detect::{find_effectcraft_cli, find_ffmpeg, find_ffmpeg_at, Ffmpeg};
+pub use detect::{find_effectcraft_cli, find_ffmpeg, find_ffmpeg_at, sidecar_ffmpeg, Ffmpeg};
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use progress::{parse_progress_line, EncodeProgress};
 pub use run::{encode, encode_path, thumbnail_png, EncodeResult, EncodeStop};
@@ -24,7 +25,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FfmpegError {
-    #[error("FFmpeg was not found. Install it and make sure `ffmpeg` is on PATH, or set the FFMPEG_PATH environment variable.\n\nWindows: winget install Gyan.FFmpeg  (or download a build from https://www.gyan.dev/ffmpeg/builds/ and add the bin folder to PATH)\nmacOS: brew install ffmpeg\nLinux: sudo apt install ffmpeg   or   sudo dnf install ffmpeg")]
+    #[error("FFmpeg was not found. Put ffmpeg.exe (and ffprobe.exe) in the same folder as EncodeCraft, or install FFmpeg and add it to PATH, or set the FFMPEG_PATH environment variable.\n\nWindows zip: ffmpeg.exe should already sit next to encodecraft.exe. If you moved the files, keep them together.\nWindows install: winget install Gyan.FFmpeg  (or https://www.gyan.dev/ffmpeg/builds/ )\nmacOS: brew install ffmpeg\nLinux: sudo apt install ffmpeg   or   sudo dnf install ffmpeg")]
     Missing,
     #[error("effectcraft-cli was not found (needed to render a composition before encoding). Set EFFECTCRAFT_CLI or put effectcraft-cli on PATH.")]
     EffectCraftMissing,

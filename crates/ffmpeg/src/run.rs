@@ -236,9 +236,15 @@ pub fn partial_output(final_out: &Path) -> PathBuf {
         let stem = seq_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "seq".into());
         return parent.join(format!(".{stem}.encodecraft-partial")).join(name);
     }
+    // Keep a real media extension so FFmpeg can pick a muxer.
+    let stem = final_out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+    let fname = match final_out.extension() {
+        Some(ext) => format!(".{stem}.encodecraft-partial.{}", ext.to_string_lossy()),
+        None => format!(".{stem}.encodecraft-partial"),
+    };
     match final_out.parent() {
-        Some(dir) => dir.join(format!(".{name}.encodecraft-partial")),
-        None => PathBuf::from(format!(".{name}.encodecraft-partial")),
+        Some(dir) => dir.join(fname),
+        None => PathBuf::from(fname),
     }
 }
 
@@ -339,7 +345,9 @@ mod tests {
     fn partial_output_is_beside_final() {
         let p = PathBuf::from("/out/clip.mp4");
         let t = partial_output(&p);
-        assert!(t.file_name().unwrap().to_string_lossy().contains("encodecraft-partial"));
+        let name = t.file_name().unwrap().to_string_lossy();
+        assert!(name.contains("encodecraft-partial"));
+        assert!(name.ends_with(".mp4"), "{name}");
         assert_eq!(t.parent(), p.parent());
         assert_ne!(t, p);
     }

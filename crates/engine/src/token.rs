@@ -54,6 +54,10 @@ fn restrict_mode(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Constant-time-ish compare for the local token (length is not secret).

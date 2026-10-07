@@ -1192,18 +1192,39 @@ fn eta_lbl(s: Option<f64>) -> String {
     }
 }
 
+mod generated_icon {
+    include!(concat!(env!("OUT_DIR"), "/app_icon.rs"));
+}
+
+fn window_icon() -> Option<egui::IconData> {
+    let bytes = generated_icon::png_bytes()?;
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
 /// Native window options shared by the desktop app.
 pub fn native_options() -> eframe::NativeOptions {
-    eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 620.0])
-            .with_title(PRODUCT)
-            .with_drag_and_drop(true),
-        ..Default::default()
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([960.0, 620.0])
+        .with_title(PRODUCT)
+        .with_drag_and_drop(true);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
     }
+    eframe::NativeOptions { viewport, ..Default::default() }
 }
 
 pub fn run(handle: Handle) -> eframe::Result<()> {
     eframe::run_native(PRODUCT, native_options(), Box::new(|_cc| Ok(Box::new(EncodeApp::new(handle)))))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn window_stays_iconless_until_assets_are_dropped_in() {
+        assert!(super::window_icon().is_none(), "assets/app-icon PNG is optional; do not embed colour until the user sends the final files");
+        let _ = super::native_options();
+    }
 }

@@ -42,6 +42,8 @@ A ready-to-run 64-bit zip (`encodecraft-*-windows-x64.zip`) ships `encodecraft.e
 
 To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
 
+The Windows `.exe` icon is a drop-in: put `encodecraft.ico` and `encodecraft-256.png` in [`assets/app-icon/`](assets/app-icon/). Until those files exist, the build does not embed an icon.
+
 ### FFmpeg on Windows (if you are compiling yourself)
 
 EncodeCraft looks for `ffmpeg.exe` **next to its own .exe first**, then `FFMPEG_PATH`, then PATH.

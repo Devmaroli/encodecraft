@@ -16,6 +16,8 @@ pub enum PresetReason {
     OtherScreen,
     /// EffectCraft / `preset_id: auto` with no named screen — Installation.
     StudioDefault,
+    /// File with no screen name — the configured default preset.
+    Default,
     #[default]
     Manual,
 }
@@ -27,8 +29,24 @@ impl PresetReason {
             PresetReason::ListedScreen => "listed screen",
             PresetReason::OtherScreen => "other screen",
             PresetReason::StudioDefault => "installation default",
+            PresetReason::Default => "default",
             PresetReason::Manual => "override",
         }
+    }
+
+    /// Queue tag copy from the approved mockup.
+    pub fn tag_label(self) -> &'static str {
+        match self {
+            PresetReason::UltraWide => "Auto · ultra wide",
+            PresetReason::ListedScreen => "Auto · listed screen",
+            PresetReason::OtherScreen | PresetReason::StudioDefault => "Auto · other screen",
+            PresetReason::Default => "Default",
+            PresetReason::Manual => "Manual",
+        }
+    }
+
+    pub fn is_auto(self) -> bool {
+        matches!(self, PresetReason::UltraWide | PresetReason::ListedScreen | PresetReason::OtherScreen | PresetReason::StudioDefault)
     }
 }
 
@@ -124,6 +142,16 @@ fn default_listed_screens() -> Vec<ScreenMatchRule> {
         ),
         ScreenMatchRule::new("The Avenues The Mall Entrance", &["the mall entrance"], 1920, 1080, false),
         ScreenMatchRule::new("The Avenues Grand Plaza Entrance", &["grand plaza"], 1920, 1080, false),
+        ScreenMatchRule::new(
+            "The Avenues – Eye of Kuwait",
+            &["eye of kuwait", "avenues eye of kuwait", "the avenues – eye of kuwait"],
+            7560,
+            2100,
+            true,
+        ),
+        ScreenMatchRule::new("Al Salam Sync", &["al salam", "salam sync"], 3072, 576, true),
+        ScreenMatchRule::new("Piccadilly", &["piccadilly single"], 2027, 720, true),
+        ScreenMatchRule::new("Piccadilly Combined", &["piccadilly combined"], 6080, 720, true),
     ]
 }
 
@@ -481,13 +509,25 @@ mod tests {
         let kuwait_gate = pick_name("Kuwait Gate", 4460, 378);
         assert_eq!(kuwait_gate.reason, PresetReason::UltraWide);
         let piccadilly = pick_name("Piccadilly combined", 6080, 720);
-        assert_eq!(piccadilly.reason, PresetReason::UltraWide);
+        assert_eq!(piccadilly.preset_id, BETTER_RES_ID);
         let thuraya = pick_name("Thuraya", 3584, 608);
         assert_eq!(thuraya.reason, PresetReason::UltraWide);
-        // 7560/2100 ≈ 3.6 — not > 5, so Installation unless the user adds the name.
+    }
+
+    #[test]
+    fn eye_of_kuwait_al_salam_piccadilly_are_listed_better_res() {
         let eye = pick_name("Eye of Kuwait", 7560, 2100);
-        assert_eq!(eye.preset_id, INSTALLATION_ID);
-        assert_eq!(eye.reason, PresetReason::OtherScreen);
+        assert_eq!(eye.preset_id, BETTER_RES_ID);
+        assert_eq!(eye.reason, PresetReason::ListedScreen);
+        let avenues = pick_name("The Avenues – Eye of Kuwait", 7560, 2100);
+        assert_eq!(avenues.preset_id, BETTER_RES_ID);
+        let salam = pick_name("Al Salam Sync", 3072, 576);
+        assert_eq!(salam.preset_id, BETTER_RES_ID);
+        let pic = pick_name("Piccadilly", 2027, 720);
+        assert_eq!(pic.preset_id, BETTER_RES_ID);
+        assert_eq!(pic.reason, PresetReason::ListedScreen);
+        let pair = pick_name("Piccadilly Combined", 6080, 720);
+        assert_eq!(pair.preset_id, BETTER_RES_ID);
     }
 
     #[test]

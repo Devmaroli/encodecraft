@@ -82,6 +82,21 @@ impl OutputFormat {
         }
     }
 
+    pub fn short_label(self) -> &'static str {
+        match self {
+            OutputFormat::H264Mp4 => "H.264",
+            OutputFormat::HevcMp4 => "H.265",
+            OutputFormat::ProResMov => "ProRes",
+            OutputFormat::WebmVp9 => "WebM",
+            OutputFormat::Gif => "GIF",
+            OutputFormat::PngSequence => "PNG",
+            OutputFormat::JpegSequence => "JPEG",
+            OutputFormat::Aac => "AAC",
+            OutputFormat::Wav => "WAV",
+            OutputFormat::Mp3 => "MP3",
+        }
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             OutputFormat::H264Mp4 | OutputFormat::HevcMp4 => "mp4",
@@ -298,6 +313,9 @@ pub struct ExportPreset {
     /// One-off (Approval Res, Sultan, …): do not remember as the manual choice for this comp.
     #[serde(default)]
     pub one_off: bool,
+    /// User-preset folder in the browser (`Ramadan campaign`). Empty = ungrouped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
 }
 
 impl ExportPreset {
@@ -312,11 +330,36 @@ impl ExportPreset {
         p
     }
 
+    pub fn bitrate_short(&self) -> String {
+        match self.video.quality {
+            Quality::Vbr2Pass { target_mbps, max_mbps } => format!("{}–{} Mbps", compact_mbps(target_mbps), compact_mbps(max_mbps)),
+            Quality::Bitrate { kbps } if kbps >= 1000 => format!("{:.0} Mbps", kbps as f64 / 1000.0),
+            Quality::Bitrate { kbps } => format!("{kbps} kbps"),
+            Quality::Crf { value } => format!("CRF {value}"),
+            Quality::Quality { value } => format!("Q{value}"),
+        }
+    }
+
+    /// Rough file-size estimate from target bitrate (video + optional audio).
+    pub fn estimate_file_mb(&self, duration_sec: f64) -> f64 {
+        let v = self.video.quality.target_kbps().unwrap_or(0) as f64;
+        let a = if self.audio.enabled { f64::from(self.audio.bitrate_kbps) } else { 0.0 };
+        ((v + a) / 8.0) * duration_sec / 1000.0
+    }
+
     /// Overlay JSON fields (from an enqueue `preset_override`) onto a clone.
     pub fn merge_override(&self, overlay: &serde_json::Value) -> Result<Self, PresetError> {
         let mut v = serde_json::to_value(self)?;
         merge_json(&mut v, overlay);
         Ok(serde_json::from_value(v)?)
+    }
+}
+
+fn compact_mbps(v: f64) -> String {
+    if (v - v.round()).abs() < 0.05 {
+        format!("{:.0}", v)
+    } else {
+        format!("{:.1}", v)
     }
 }
 
@@ -454,6 +497,22 @@ impl PresetLibrary {
 
     pub fn is_studio_system(id: &str) -> bool {
         id == BETTER_RES_ID || id == INSTALLATION_ID || id == APPROVAL_RES_ID || id == SULTAN_ID
+    }
+
+    pub fn studio_presets(&self) -> Vec<ExportPreset> {
+        self.all().into_iter().filter(|p| Self::is_studio_system(&p.id)).collect()
+    }
+
+    pub fn reset_studio_to_builtin(&mut self, id: &str) -> Result<ExportPreset, PresetError> {
+        if !Self::is_studio_system(id) {
+            return Err(PresetError::Message("not a studio preset".into()));
+        }
+        self.system_overrides.retain(|p| p.id != id);
+        self.get(id)
+    }
+
+    pub fn builtin_copy(id: &str) -> Result<ExportPreset, PresetError> {
+        builtin_presets().into_iter().find(|p| p.id == id).ok_or_else(|| PresetError::Unknown(id.into()))
     }
 
     pub fn name_suggests_one_off(name: &str) -> bool {
@@ -719,6 +778,7 @@ fn preset(id: &str, name: &str, format: OutputFormat, quality: Quality, audio: b
         video: VideoSettings { quality, ..VideoSettings::default() },
         audio: AudioSettings { enabled: audio && format.ffmpeg_audio_codec().is_some(), ..AudioSettings::default() },
         one_off: false,
+        group: String::new(),
     }
 }
 
@@ -737,6 +797,7 @@ fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64, one_off: b
         },
         audio: AudioSettings { enabled: true, ..AudioSettings::default() },
         one_off,
+        group: "Studio".into(),
     }
 }
 

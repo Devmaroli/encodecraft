@@ -22,7 +22,8 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 - Encode **queue**: add (picker + drag-and-drop), reorder, remove, duplicate, start / pause / stop, parallel jobs with a configurable limit
 - **Presets**: H.264 MP4, studio **Better Res** (7/8 Mbps), **Installation** (5/6 Mbps), **Approval Res** (1/1.2 Mbps with AAC), **Sultan** (2/3 Mbps, no audio); one-off presets are not remembered as a manual choice. Also H.265/HEVC MP4, ProRes MOV, WebM VP9, animated GIF, PNG/JPEG sequences, AAC / WAV / MP3 — create, edit, import, export
 - Per-job **container, codec, size, fps, CRF / bitrate / 2-pass VBR, audio, trim**, plus per-item preset override
-- **DOOH screen sizes** and **one source → many sizes**, with automatic Better Res vs Installation from screen name/size (ultra-wide, listed screens; editable in Settings / `presets.json`)
+- **Preset selection** like Media Encoder: blue Format/Preset dropdowns per output, Auto/Manual/Default tags, pinned Studio group, drag from the Preset Browser onto multi-selected rows (Undo), and a form-based Auto-assign rules editor
+- **DOOH screen sizes** and **one source → many sizes**, with automatic Better Res vs Installation from screen name/size (ultra-wide, listed screens including Eye of Kuwait, Al Salam Sync, Piccadilly; editable in the rules window)
 - Tall canvases (any side > 4096, e.g. 1008×5184) use H.264 **level 6.2**; frames H.264 cannot encode are flagged on the queue item
 - Output **naming** (`{name}_{width}x{height}`) and output folder
 - **Watch folders**

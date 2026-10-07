@@ -260,6 +260,7 @@ mod tests {
             video: VideoSettings { width: Some(1920), height: Some(1080), ..VideoSettings::default() },
             audio: Default::default(),
             one_off: false,
+            group: String::new(),
         }
     }
 

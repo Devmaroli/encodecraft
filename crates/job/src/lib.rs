@@ -229,6 +229,27 @@ impl JobSource {
         }
     }
 
+    /// Group key so one EffectCraft project / one file shows as a parent row with child outputs.
+    pub fn group_key(&self) -> String {
+        match self {
+            JobSource::File { path, .. } => format!("file:{}", path.to_string_lossy()),
+            JobSource::EffectCraft { project, .. } => format!("ec:{}", project.to_string_lossy()),
+        }
+    }
+
+    pub fn group_title(&self) -> String {
+        match self {
+            JobSource::File { path, .. } => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            JobSource::EffectCraft { project, .. } => {
+                project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.to_string_lossy().into_owned())
+            }
+        }
+    }
+
+    pub fn is_effectcraft(&self) -> bool {
+        matches!(self, JobSource::EffectCraft { .. })
+    }
+
     /// Pixel size carried on the request (EffectCraft comp size). `None` until probed.
     pub fn pixel_size(&self) -> Option<(u32, u32)> {
         match self {

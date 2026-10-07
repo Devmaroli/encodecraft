@@ -259,6 +259,52 @@ impl EncodeQueue {
         Ok(new_id_s)
     }
 
+    /// Another output under the same source (drop a preset on a source row).
+    pub fn add_output_like(&mut self, id: &str, mut preset: ExportPreset, allow_overwrite: bool) -> Result<String, QueueError> {
+        let i = self.index_of(id).ok_or_else(|| QueueError::Message(format!("no job {id}")))?;
+        let mut copy = self.jobs[i].clone();
+        let w = copy.preset.video.width;
+        let h = copy.preset.video.height;
+        preset.video.width = w;
+        preset.video.height = h;
+        preset.video.scale = copy.scale;
+        copy.preset = preset;
+        copy.preset_overridden = true;
+        copy.preset_reason = Some(PresetReason::Manual);
+        copy.id = new_id("job");
+        copy.status = JobStatus::Waiting;
+        copy.progress = ProgressSnap::default();
+        copy.log.clear();
+        copy.error = None;
+        copy.started_ms = None;
+        copy.finished_ms = None;
+        copy.created_ms = unix_ms();
+        let ctx = NamingContext::from_preset(
+            &copy.source.display_name(),
+            &copy.preset,
+            w.unwrap_or(0),
+            h.unwrap_or(0),
+            &copy.id,
+            1,
+            copy.screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""),
+        );
+        let dir = copy.output.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let base = output_path(&dir, &copy.naming, &ctx, copy.preset.format.is_sequence());
+        copy.output = unique_output_path(base, allow_overwrite);
+        let new_id_s = copy.id.clone();
+        self.jobs.insert(i + 1, copy);
+        Ok(new_id_s)
+    }
+
+    pub fn reapply_auto_rows(&mut self, lib: &PresetLibrary) {
+        for j in &mut self.jobs {
+            if j.preset_overridden {
+                continue;
+            }
+            j.refresh_auto_preset(lib);
+        }
+    }
+
     pub fn move_job(&mut self, id: &str, delta: isize) -> Result<(), QueueError> {
         let i = self.index_of(id).ok_or_else(|| QueueError::Message(format!("no job {id}")))?;
         let j = if delta < 0 { i.saturating_sub(delta.unsigned_abs()) } else { i.saturating_add(delta as usize).min(self.jobs.len().saturating_sub(1)) };
@@ -345,6 +391,8 @@ impl EncodeQueue {
                         pr = chosen;
                         preset_reason = Some(PresetReason::StudioDefault);
                     }
+                } else {
+                    preset_reason = Some(PresetReason::Default);
                 }
             } else if !req.preset_id.is_empty() {
                 preset_overridden = true;
@@ -751,7 +799,7 @@ mod tests {
         };
         let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
         assert_eq!(jobs[0].preset.id, "system.h264-mp4");
-        assert!(jobs[0].preset_reason.is_none());
+        assert_eq!(jobs[0].preset_reason, Some(PresetReason::Default));
     }
 
     #[test]

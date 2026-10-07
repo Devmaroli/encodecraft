@@ -4,6 +4,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod demo;
 mod drops;
 mod fsutil;
 mod ipc;
@@ -18,6 +19,7 @@ pub use drops::{
 };
 pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, set_home};
+pub use demo::seed_preset_ui_demo;
 pub use persist::Settings;
 pub use watch::WatchFolder;
 
@@ -424,6 +426,100 @@ impl Session {
         }
         thumbnail_png(ff, src, &dest, job.trim.in_sec.max(0.1)).ok()?;
         Some(dest)
+    }
+
+    pub fn apply_preset_to_jobs(&mut self, ids: &[String], preset_id: &str) -> Result<usize, EngineError> {
+        let pr = self.presets.get_or_parse(preset_id).map_err(|e| EngineError::Message(e.to_string()))?;
+        let mut n = 0usize;
+        let mut touches = Vec::new();
+        for id in ids {
+            let Some(j) = self.queue.jobs.iter_mut().find(|j| j.id == *id) else {
+                continue;
+            };
+            if j.status.is_active() {
+                continue;
+            }
+            let w = j.preset.video.width;
+            let h = j.preset.video.height;
+            let scale = j.scale;
+            let mut next = pr.clone();
+            next.video.width = w;
+            next.video.height = h;
+            next.video.scale = scale;
+            j.preset = next;
+            j.preset_overridden = true;
+            j.preset_reason = Some(encodecraft_presets::PresetReason::Manual);
+            j.encode_warning = encodecraft_ffmpeg::h264_unencodable_message(&j.preset, w.unwrap_or(0), h.unwrap_or(0));
+            touches.push((j.source.clone(), j.screen.clone()));
+            n = n.saturating_add(1);
+        }
+        for (src, screen) in touches {
+            self.presets.remember_manual_choice(&src, screen.as_ref(), &pr);
+        }
+        self.settings.remember_recent(&pr.id);
+        Ok(n)
+    }
+
+    pub fn reset_jobs_to_auto(&mut self, ids: &[String]) -> Result<usize, EngineError> {
+        let mut n = 0usize;
+        let presets = self.presets.clone();
+        let default_id = self.settings.default_preset_id.clone();
+        for id in ids {
+            let key = self.queue.jobs.iter().find(|j| j.id == *id).map(|j| (j.source.clone(), j.screen.clone()));
+            if let Some((src, screen)) = key {
+                self.presets.clear_sticky(&src, screen.as_ref());
+            }
+            let Some(j) = self.queue.jobs.iter_mut().find(|j| j.id == *id) else {
+                continue;
+            };
+            let w = j.preset.video.width;
+            let h = j.preset.video.height;
+            let scale = j.scale;
+            j.preset_overridden = false;
+            if let Ok(base) = presets.get("system.h264-mp4") {
+                j.preset = base;
+                j.preset.video.width = w;
+                j.preset.video.height = h;
+                j.preset.video.scale = scale;
+            }
+            j.refresh_auto_preset(&presets);
+            if j.preset_reason.is_none() {
+                if let Ok(p) = presets.get(&default_id) {
+                    j.preset = p;
+                    j.preset.video.width = w;
+                    j.preset.video.height = h;
+                    j.preset.video.scale = scale;
+                    j.preset_reason = Some(encodecraft_presets::PresetReason::Default);
+                }
+            }
+            n = n.saturating_add(1);
+        }
+        Ok(n)
+    }
+
+    pub fn add_output_with_preset(&mut self, like_id: &str, preset_id: &str) -> Result<String, EngineError> {
+        let pr = self.presets.get_or_parse(preset_id).map_err(|e| EngineError::Message(e.to_string()))?;
+        let id = self.queue.add_output_like(like_id, pr.clone(), self.settings.allow_overwrite)?;
+        self.settings.remember_recent(&pr.id);
+        Ok(id)
+    }
+
+    pub fn snapshot_presets(&self, ids: &[String]) -> Vec<(String, encodecraft_presets::ExportPreset, bool, Option<encodecraft_presets::PresetReason>)> {
+        ids.iter()
+            .filter_map(|id| {
+                self.queue.jobs.iter().find(|j| j.id == *id).map(|j| (j.id.clone(), j.preset.clone(), j.preset_overridden, j.preset_reason))
+            })
+            .collect()
+    }
+
+    pub fn restore_preset_snapshot(&mut self, snap: &[(String, encodecraft_presets::ExportPreset, bool, Option<encodecraft_presets::PresetReason>)]) {
+        for (id, preset, overridden, reason) in snap {
+            if let Some(j) = self.queue.jobs.iter_mut().find(|j| j.id == *id) {
+                j.preset = preset.clone();
+                j.preset_overridden = *overridden;
+                j.preset_reason = *reason;
+            }
+        }
     }
 }
 

@@ -34,6 +34,9 @@ pub struct Settings {
     /// Kill FFmpeg if it prints nothing for this many seconds.
     #[serde(default = "default_stall")]
     pub stall_timeout_sec: u64,
+    /// Recently applied preset ids (most recent first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_preset_ids: Vec<String>,
 }
 
 fn default_parallel() -> usize {
@@ -66,6 +69,7 @@ impl Default for Settings {
             watch_folders: Vec::new(),
             allow_overwrite: false,
             stall_timeout_sec: 120,
+            recent_preset_ids: Vec::new(),
         }
     }
 }
@@ -78,6 +82,15 @@ impl Settings {
     pub fn save(&self, path: &Path) -> Result<(), EngineError> {
         crate::fsutil::atomic_write(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
+    }
+
+    pub fn remember_recent(&mut self, preset_id: &str) {
+        if preset_id.trim().is_empty() {
+            return;
+        }
+        self.recent_preset_ids.retain(|id| id != preset_id);
+        self.recent_preset_ids.insert(0, preset_id.to_string());
+        self.recent_preset_ids.truncate(8);
     }
 }
 

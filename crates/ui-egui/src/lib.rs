@@ -3,39 +3,51 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod theme;
+mod ux;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
-use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, DropOutcome, Handle};
+use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, seed_preset_ui_demo, DropOutcome, Handle};
 use encodecraft_job::{ScaleMode, ScreenSize, PRODUCT};
-use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality};
+use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
 use crate::theme::{ThemeKind, Tokens};
 
 pub struct EncodeApp {
-    handle: Handle,
-    tokens: Tokens,
-    bottom_tab: BottomTab,
-    preset_filter: String,
+    pub(crate) handle: Handle,
+    pub(crate) tokens: Tokens,
+    pub(crate) bottom_tab: BottomTab,
+    pub(crate) preset_filter: String,
     log_filter: String,
     show_watch: bool,
     show_batch: bool,
-    show_preset_edit: bool,
+    pub(crate) show_preset_edit: bool,
     show_about: bool,
     batch_sizes: Vec<bool>,
-    edit_preset: Option<ExportPreset>,
+    pub(crate) edit_preset: Option<ExportPreset>,
     thumb_tex: HashMap<String, egui::TextureHandle>,
-    status: String,
+    pub(crate) status: String,
     last_persist: std::time::Instant,
     drop_notice: Option<(String, Instant)>,
     ecproj_picker: Option<EcprojPicker>,
-    rules_listed: String,
-    rules_ultra: String,
-    rules_hydrated: bool,
+    pub(crate) show_rules: bool,
+    pub(crate) selected_ids: Vec<String>,
+    pub(crate) collapsed: HashSet<String>,
+    pub(crate) browser_selected: Option<String>,
+    pub(crate) toast: Option<ux::UndoToast>,
+    pub(crate) preset_popup_for: Option<String>,
+    pub(crate) format_popup_for: Option<String>,
+    pub(crate) popup_anchor: Option<Pos2>,
+    pub(crate) preset_search: String,
+    pub(crate) shift_anchor: Option<String>,
+    pub(crate) try_screen: String,
+    pub(crate) try_result: Option<String>,
+    pub(crate) rules_new_ultra: String,
+    pub(crate) show_screen_picker: bool,
 }
 
 struct EcprojPicker {
@@ -47,7 +59,7 @@ struct EcprojPicker {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BottomTab {
+pub(crate) enum BottomTab {
     Encode,
     Preview,
     Log,
@@ -56,6 +68,10 @@ enum BottomTab {
 
 impl EncodeApp {
     pub fn new(handle: Handle) -> Self {
+        if std::env::var("ENCODECRAFT_DEMO").ok().as_deref() == Some("1") {
+            let _ = handle.lock(|s| seed_preset_ui_demo(s));
+        }
+        let selected = handle.lock(|s| s.selected.clone());
         Self {
             handle,
             tokens: Tokens::for_kind(ThemeKind::Dark),
@@ -73,13 +89,24 @@ impl EncodeApp {
             last_persist: std::time::Instant::now(),
             drop_notice: None,
             ecproj_picker: None,
-            rules_listed: String::new(),
-            rules_ultra: String::new(),
-            rules_hydrated: false,
+            show_rules: false,
+            selected_ids: selected.clone().into_iter().collect(),
+            collapsed: HashSet::new(),
+            browser_selected: None,
+            toast: None,
+            preset_popup_for: None,
+            format_popup_for: None,
+            popup_anchor: None,
+            preset_search: String::new(),
+            shift_anchor: selected,
+            try_screen: String::new(),
+            try_result: None,
+            rules_new_ultra: String::new(),
+            show_screen_picker: false,
         }
     }
 
-    fn t(&self) -> Tokens {
+    pub(crate) fn t(&self) -> Tokens {
         self.tokens
     }
 }
@@ -93,6 +120,9 @@ impl eframe::App for EncodeApp {
         theme::apply(ctx, &self.tokens);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
+            self.undo_toast();
+        }
         self.ingest_drops(ctx);
         self.drop_overlay(ctx);
         if self.last_persist.elapsed() > std::time::Duration::from_secs(4) {
@@ -113,8 +143,8 @@ impl eframe::App for EncodeApp {
                     .default_width(280.0)
                     .width_range(200.0..=420.0)
                     .frame(egui::Frame::NONE.fill(t.panel_bg).inner_margin(8.0))
-                    .show_inside(ui, |ui| self.preset_browser(ui));
-                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.app_bg).inner_margin(6.0)).show_inside(ui, |ui| self.queue_panel(ui));
+                    .show_inside(ui, |ui| self.preset_browser_ux(ui));
+                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.app_bg).inner_margin(6.0)).show_inside(ui, |ui| self.queue_panel_ux(ui));
             });
             ui.separator();
             ui.allocate_ui(Vec2::new(avail.x, bottom_h), |ui| self.bottom(ui));
@@ -284,6 +314,11 @@ impl EncodeApp {
                         self.handle.lock(|s| s.queue.remove_finished());
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("Auto-assign rules…").clicked() {
+                        self.show_rules = true;
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Watch", |ui| {
                     if ui.button("Watch folders…").clicked() {
@@ -366,205 +401,6 @@ impl EncodeApp {
                 });
             },
         );
-    }
-
-    fn queue_panel(&mut self, ui: &mut Ui) {
-        let t = self.t();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Queue").strong().size(14.0));
-            let (n, run) = self.handle.lock(|s| (s.queue.jobs.len(), s.queue.running));
-            ui.label(RichText::new(format!("{n} item(s) · {}", if run { "running" } else { "idle" })).color(t.text_dim));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Drop media or .ecproj here").color(t.text_faint).italics().size(12.0));
-            });
-        });
-        ui.add_space(4.0);
-        let jobs: Vec<Job> = self.handle.lock(|s| s.queue.jobs.clone());
-        let selected = self.handle.lock(|s| s.selected.clone());
-        if jobs.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(48.0);
-                ui.label(RichText::new("Queue is empty").size(16.0).color(t.text_dim));
-                ui.label(RichText::new("Drop media from Explorer, drop an EffectCraft .ecproj to pick comps, or send a job from EffectCraft.").color(t.text_faint));
-                ui.add_space(8.0);
-                if ui.button("Add source…").clicked() {
-                    self.pick_sources();
-                }
-            });
-            return;
-        }
-        egui::ScrollArea::vertical().id_salt("queue-scroll").show(ui, |ui| {
-            for (i, job) in jobs.iter().enumerate() {
-                let is_sel = selected.as_deref() == Some(job.id.as_str());
-                let bg = if is_sel {
-                    t.row_selected
-                } else if i % 2 == 0 {
-                    t.row
-                } else {
-                    t.row_alt
-                };
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 62.0), Sense::click());
-                ui.painter().rect_filled(rect, t.radius_sm, bg);
-                if resp.clicked() {
-                    self.handle.lock(|s| s.selected = Some(job.id.clone()));
-                }
-                if resp.double_clicked() {
-                    self.bottom_tab = BottomTab::Encode;
-                }
-                let mut child =
-                    ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(10.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                child.horizontal(|ui| {
-                    status_dot(ui, job.status, &t);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(job.source.display_name()).strong());
-                        let size = job.screen.as_ref().map(|s| s.label()).unwrap_or_else(|| match (job.preset.video.width, job.preset.video.height) {
-                            (Some(w), Some(h)) => format!("{w}×{h}"),
-                            _ => "Match source".into(),
-                        });
-                        let why = match (job.preset_overridden, job.preset_reason) {
-                            (true, _) => "override".to_string(),
-                            (_, Some(r)) => r.label().to_string(),
-                            _ => String::new(),
-                        };
-                        let preset_bit = if why.is_empty() {
-                            job.preset.name.clone()
-                        } else {
-                            format!("{} ({why})", job.preset.name)
-                        };
-                        ui.label(
-                            RichText::new(format!(
-                                "{preset_bit}  ·  {size}  ·  {}",
-                                job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                            ))
-                            .size(11.0)
-                            .color(t.text_dim),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.vertical(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                ui.label(RichText::new(job.status.label()).color(status_color(job.status, &t)).size(12.0));
-                            });
-                            if job.status == JobStatus::Encoding || job.progress.percent > 0.0 {
-                                let p = (job.progress.percent / 100.0).clamp(0.0, 1.0);
-                                ui.add(egui::ProgressBar::new(p).desired_width(180.0).text(format!(
-                                    "{:.0}%  {}  ETA {}",
-                                    job.progress.percent,
-                                    speed_lbl(job.progress.speed),
-                                    eta_lbl(job.progress.eta_sec)
-                                )));
-                            } else if let Some(err) = &job.error {
-                                ui.label(RichText::new(err).color(t.danger).size(11.0));
-                            } else if let Some(w) = &job.encode_warning {
-                                ui.label(RichText::new(w).color(t.warning).size(11.0));
-                            }
-                        });
-                    });
-                });
-            }
-        });
-    }
-
-    fn preset_browser(&mut self, ui: &mut Ui) {
-        let t = self.t();
-        ui.label(RichText::new("Preset browser").strong().size(14.0));
-        ui.add(egui::TextEdit::singleline(&mut self.preset_filter).hint_text("Filter presets"));
-        ui.add_space(4.0);
-        let filter = self.preset_filter.to_ascii_lowercase();
-        let (presets, screens) = self.handle.lock(|s| (s.presets.all(), s.presets.screens.clone()));
-        egui::ScrollArea::vertical().id_salt("preset-scroll").show(ui, |ui| {
-            ui.label(RichText::new("Studio").small().color(t.text_faint));
-            for p in presets.iter().filter(|p| PresetLibrary::is_studio_system(&p.id)) {
-                if !filter.is_empty() && !p.name.to_ascii_lowercase().contains(&filter) {
-                    continue;
-                }
-                self.preset_row(ui, p);
-            }
-            ui.add_space(6.0);
-            ui.label(RichText::new("System").small().color(t.text_faint));
-            for p in presets.iter().filter(|p| p.kind == PresetKind::System && !PresetLibrary::is_studio_system(&p.id)) {
-                if !filter.is_empty() && !p.name.to_ascii_lowercase().contains(&filter) {
-                    continue;
-                }
-                self.preset_row(ui, p);
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("User").small().color(t.text_faint));
-                if ui.small_button("+").clicked() {
-                    if let Ok(dup) = self.handle.lock(|s| s.presets.duplicate(&s.settings.default_preset_id.clone(), "Custom preset")) {
-                        self.edit_preset = Some(dup);
-                        self.show_preset_edit = true;
-                    }
-                }
-            });
-            for p in presets.iter().filter(|p| p.kind == PresetKind::User) {
-                if !filter.is_empty() && !p.name.to_ascii_lowercase().contains(&filter) {
-                    continue;
-                }
-                self.preset_row(ui, p);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Screen sizes (DOOH)").small().color(t.text_faint));
-                if ui.small_button("+").clicked() {
-                    self.handle.lock(|s| s.presets.upsert_screen(ScreenSize::new("Custom", 1080, 1080)));
-                }
-            });
-            for sz in &screens {
-                let label = sz.label();
-                if !filter.is_empty() && !label.to_ascii_lowercase().contains(&filter) {
-                    continue;
-                }
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(false, &label).clicked() {
-                        if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
-                            self.handle.lock(|s| {
-                                if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
-                                    j.preset.video.width = Some(sz.width);
-                                    j.preset.video.height = Some(sz.height);
-                                    j.screen = Some(sz.clone());
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    fn preset_row(&mut self, ui: &mut Ui, p: &ExportPreset) {
-        ui.horizontal(|ui| {
-            let resp = ui.selectable_label(false, format!("{}  ({})", p.name, p.format.extension()));
-            if resp.clicked() {
-                let id = p.id.clone();
-                self.handle.lock(|s| s.settings.default_preset_id = id.clone());
-                if let Some(sel) = s_selected(&self.handle) {
-                    self.handle.lock(|s| {
-                        if let Ok(pr) = s.presets.get(&id) {
-                            if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == sel) {
-                                let w = j.preset.video.width;
-                                let h = j.preset.video.height;
-                                s.presets.remember_manual_choice(&j.source, j.screen.as_ref(), &pr);
-                                j.preset = pr;
-                                if let (Some(w), Some(h)) = (w, h) {
-                                    j.preset.video.width = Some(w);
-                                    j.preset.video.height = Some(h);
-                                }
-                                j.preset_overridden = true;
-                                j.preset_reason = Some(PresetReason::Manual);
-                                j.encode_warning = encodecraft_ffmpeg::h264_unencodable_message(&j.preset, w.unwrap_or(0), h.unwrap_or(0));
-                            }
-                        }
-                    });
-                    self.handle.persist();
-                }
-            }
-            if resp.double_clicked() {
-                self.edit_preset = Some(p.clone());
-                self.show_preset_edit = true;
-            }
-        });
     }
 
     fn bottom(&mut self, ui: &mut Ui) {
@@ -831,7 +667,16 @@ impl EncodeApp {
         });
         ui.horizontal(|ui| {
             ui.label("Default preset");
-            ui.add(egui::TextEdit::singleline(&mut s.default_preset_id).desired_width(220.0));
+            let presets = self.handle.lock(|x| x.presets.all());
+            let cur = presets.iter().find(|p| p.id == s.default_preset_id).map(|p| p.name.clone()).unwrap_or_else(|| s.default_preset_id.clone());
+            egui::ComboBox::from_id_salt("default-preset").selected_text(&cur).show_ui(ui, |ui| {
+                for p in &presets {
+                    if ui.selectable_label(p.id == s.default_preset_id, &p.name).clicked() {
+                        s.default_preset_id = p.id.clone();
+                    }
+                }
+            });
+            ui.label(RichText::new("used when a file has no screen name").small().color(self.t().text_dim));
         });
         ui.horizontal(|ui| {
             ui.label("Control port");
@@ -842,35 +687,13 @@ impl EncodeApp {
         ui.add_space(8.0);
         ui.label(RichText::new("Studio screen assignment").strong());
         ui.label(
-            RichText::new("Sized jobs pick Better Res (ultra wide / listed screens) or Installation. Edit these lists to add screens later; stored in presets.json.")
+            RichText::new("Sized jobs pick Better Res (ultra wide / listed screens) or Installation. Open the rules editor to change the lists — no typing JSON.")
                 .small()
                 .color(self.t().text_dim),
         );
-        if !self.rules_hydrated {
-            let (listed, ultra, enabled, aspect) = self.handle.lock(|x| {
-                (
-                    x.presets.screen_rules.listed_as_text(),
-                    x.presets.screen_rules.ultra_wide_names_text(),
-                    x.presets.screen_rules.enabled,
-                    x.presets.screen_rules.ultra_wide_aspect,
-                )
-            });
-            self.rules_listed = listed;
-            self.rules_ultra = ultra;
-            self.rules_hydrated = true;
-            let _ = (enabled, aspect);
+        if ui.button("Auto-assign rules…").clicked() {
+            self.show_rules = true;
         }
-        let mut enabled = self.handle.lock(|x| x.presets.screen_rules.enabled);
-        let mut aspect = self.handle.lock(|x| x.presets.screen_rules.ultra_wide_aspect);
-        ui.checkbox(&mut enabled, "Auto-assign Better Res / Installation from screen name and size");
-        ui.horizontal(|ui| {
-            ui.label("Ultra-wide if landscape and width/height >");
-            ui.add(egui::DragValue::new(&mut aspect).range(1.0..=20.0).speed(0.1));
-        });
-        ui.label("Always ultra-wide names (one per line)");
-        ui.add(egui::TextEdit::multiline(&mut self.rules_ultra).desired_width(480.0).desired_rows(3));
-        ui.label("Better Res listed screens  (Name | aliases | WxH)");
-        ui.add(egui::TextEdit::multiline(&mut self.rules_listed).desired_width(480.0).desired_rows(6));
         ui.add_space(8.0);
         ui.label(RichText::new("One-off presets").strong());
         ui.label(
@@ -889,10 +712,6 @@ impl EncodeApp {
         if ui.button("Apply settings").clicked() {
             self.handle.lock(|sess| {
                 sess.settings = s.clone();
-                sess.presets.screen_rules.enabled = enabled;
-                sess.presets.screen_rules.ultra_wide_aspect = aspect;
-                sess.presets.screen_rules.set_ultra_wide_names_from_text(&self.rules_ultra);
-                sess.presets.screen_rules.set_listed_from_text(&self.rules_listed);
             });
             self.handle.persist();
             self.status = "Settings saved".into();
@@ -930,9 +749,9 @@ impl EncodeApp {
         if self.show_batch {
             self.batch_dialog(ctx);
         }
-        if self.show_preset_edit {
-            self.preset_edit_dialog(ctx);
-        }
+        self.preset_edit_window(ctx);
+        self.rules_window(ctx);
+        self.screen_library_picker(ctx);
         self.ecproj_dialog(ctx);
     }
 
@@ -1065,94 +884,7 @@ impl EncodeApp {
         self.show_batch = open && !close;
     }
 
-    fn preset_edit_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_preset_edit;
-        let mut save = false;
-        let dim = self.t().text_dim;
-        if let Some(p) = self.edit_preset.as_mut() {
-            egui::Window::new("Edit preset").open(&mut open).default_width(420.0).show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut p.name);
-                });
-                ui.label(format!("id  {}", p.id));
-                ui.label(p.format.label());
-                if p.format == OutputFormat::H264Mp4 {
-                    ui.horizontal(|ui| {
-                        ui.label("H.264 profile");
-                        let mut profile = p.video.h264_profile.clone().unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut profile).desired_width(80.0).hint_text("high")).changed() {
-                            p.video.h264_profile = if profile.trim().is_empty() { None } else { Some(profile) };
-                        }
-                        ui.label("Level");
-                        let mut level = p.video.h264_level.clone().unwrap_or_else(|| "auto".into());
-                        if ui.add(egui::TextEdit::singleline(&mut level).desired_width(60.0).hint_text("auto")).changed() {
-                            p.video.h264_level = if level.trim().is_empty() { Some("auto".into()) } else { Some(level) };
-                        }
-                    });
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Frame rate");
-                    let mut fps_src = matches!(p.video.frame_rate, FrameRate::Source);
-                    if ui.checkbox(&mut fps_src, "Match source").changed() {
-                        p.video.frame_rate = if fps_src { FrameRate::Source } else { FrameRate::Custom(25.0) };
-                    }
-                    if let FrameRate::Custom(ref mut f) = p.video.frame_rate {
-                        ui.add(egui::DragValue::new(f).range(1.0..=120.0).suffix(" fps"));
-                    }
-                });
-                match &mut p.video.quality {
-                    Quality::Vbr2Pass { target_mbps, max_mbps } => {
-                        ui.horizontal(|ui| {
-                            ui.label("Target Mbps");
-                            ui.add(egui::DragValue::new(target_mbps).range(1.0..=200.0).speed(0.5));
-                            ui.label("Max Mbps");
-                            ui.add(egui::DragValue::new(max_mbps).range(1.0..=250.0).speed(0.5));
-                        });
-                        ui.label(RichText::new("VBR 2-pass — change these numbers to retarget bitrate.").small().color(dim));
-                    }
-                    Quality::Crf { value } => {
-                        ui.add(egui::Slider::new(value, 0..=51).text("CRF"));
-                    }
-                    Quality::Bitrate { kbps } => {
-                        ui.add(egui::DragValue::new(kbps).range(100..=200_000).prefix("kbps "));
-                    }
-                    Quality::Quality { value } => {
-                        ui.add(egui::Slider::new(value, 1..=100).text("quality"));
-                    }
-                }
-                ui.checkbox(&mut p.audio.enabled, "Include audio");
-                if p.audio.enabled {
-                    ui.horizontal(|ui| {
-                        ui.label("Audio kbps");
-                        ui.add(egui::DragValue::new(&mut p.audio.bitrate_kbps).range(32..=512));
-                    });
-                }
-                ui.checkbox(&mut p.one_off, "One-off (don't remember as manual choice)");
-                ui.label(
-                    RichText::new("One-off presets (Approval Res, Sultan) revert to Auto on the next send of that comp.")
-                        .small()
-                        .color(dim),
-                );
-                if ui.button("Save preset").clicked() {
-                    save = true;
-                }
-            });
-        }
-        if save {
-            if let Some(p) = self.edit_preset.clone() {
-                match self.handle.lock(|s| s.presets.save_preset(p.clone()).or_else(|_| s.presets.upsert_user(p))) {
-                    Ok(()) => self.status = "Preset saved".into(),
-                    Err(e) => self.status = e.to_string(),
-                }
-                self.handle.persist();
-            }
-            open = false;
-        }
-        self.show_preset_edit = open;
-    }
-
-    fn pick_sources(&mut self) {
+    pub(crate) fn pick_sources(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter("Media", &["mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m4v", "gif", "png", "jpg", "wav", "mp3", "aac", "m4a"])
             .add_filter("EffectCraft project", &["ecproj"])
@@ -1216,7 +948,7 @@ fn status_dot(ui: &mut Ui, st: JobStatus, t: &Tokens) {
     ui.painter().circle_filled(rect.center(), 4.5, c);
 }
 
-fn status_color(st: JobStatus, t: &Tokens) -> Color32 {
+pub(crate) fn status_color(st: JobStatus, t: &Tokens) -> Color32 {
     match st {
         JobStatus::Waiting => t.text_dim,
         JobStatus::Encoding => t.accent,

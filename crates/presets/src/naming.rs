@@ -49,8 +49,8 @@ impl NamingContext {
     pub fn tokens(&self) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("name".into(), self.name.clone());
-        m.insert("width".into(), self.width.to_string());
-        m.insert("height".into(), self.height.to_string());
+        m.insert("width".into(), if self.width == 0 { "src".into() } else { self.width.to_string() });
+        m.insert("height".into(), if self.height == 0 { "src".into() } else { self.height.to_string() });
         m.insert("preset".into(), self.preset.clone());
         m.insert("codec".into(), self.codec.clone());
         m.insert("ext".into(), self.ext.clone());

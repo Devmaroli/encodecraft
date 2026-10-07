@@ -8,6 +8,9 @@
 # or MinGW DLLs). If that is not available, falls back to x86_64-pc-windows-gnu
 # (MinGW) and copies runtime DLLs.
 #
+# Optional smoke test under Wine afterwards:
+#   ./scripts/smoke-windows-wine.sh
+#
 # Environment:
 #   FFMPEG_URL   Windows FFmpeg zip (default: Gyan essentials release)
 #   SKIP_FFMPEG=1   pack the apps only (not useful for end users)

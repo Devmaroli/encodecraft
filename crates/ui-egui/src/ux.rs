@@ -1,8 +1,10 @@
 //! Queue / Preset Browser / settings windows matching the approved mockups.
 
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, Id, Pos2, Rect, RichText, Sense, Ui, Vec2};
+use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use encodecraft_job::ScreenSize;
 use encodecraft_presets::{
     ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality, ScreenMatchRule, BETTER_RES_ID, INSTALLATION_ID,
@@ -218,11 +220,26 @@ impl EncodeApp {
             }
         });
         let mut out_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.out).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        out_ui.label(RichText::new(job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).size(11.0).color(t.text_dim));
+        let out_label = job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let out_r = out_ui.add(
+            egui::Label::new(RichText::new(out_label).size(11.0).color(t.accent))
+                .truncate()
+                .sense(Sense::click()),
+        );
+        let out_r = out_r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Open in File Explorer");
+        if out_r.hovered() {
+            out_ui.painter().hline(out_r.rect.x_range(), out_r.rect.bottom() - 3.0, Stroke::new(1.0_f32, t.accent));
+        }
+        if out_r.clicked() {
+            self.reveal_in_explorer(&job.output);
+        }
         let mut st_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.status).layout(egui::Layout::left_to_right(egui::Align::Center)));
         st_ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
 
         let jid = job.id.clone();
+        out_r.context_menu(|ui| {
+            self.row_context_menu(ui, &jid, all);
+        });
         resp.context_menu(|ui| {
             self.row_context_menu(ui, &jid, all);
         });
@@ -257,6 +274,13 @@ impl EncodeApp {
                         j.output = p;
                     }
                 });
+            }
+            ui.close();
+        }
+        if ui.button("Show in Explorer").clicked() {
+            let path = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == job_id).map(|j| j.output.clone()));
+            if let Some(p) = path {
+                self.reveal_in_explorer(&p);
             }
             ui.close();
         }
@@ -329,14 +353,37 @@ impl EncodeApp {
             self.toast = None;
             return;
         }
-        egui::Frame::NONE.fill(Color32::from_rgb(0x2a, 0x5a, 0x38)).inner_margin(8.0).corner_radius(6.0).show(ui, |ui| {
+        let can_undo = !toast.snapshot.is_empty();
+        let fill = if can_undo { Color32::from_rgb(0x2a, 0x5a, 0x38) } else { Color32::from_rgb(0x3a, 0x38, 0x28) };
+        let fg = if can_undo { Color32::from_rgb(0xd8, 0xf0, 0xdc) } else { Color32::from_rgb(0xf0, 0xe8, 0xd0) };
+        let prefix = if can_undo { "✓  " } else { "" };
+        egui::Frame::NONE.fill(fill).inner_margin(8.0).corner_radius(6.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("✓  {}", toast.message)).color(Color32::from_rgb(0xd8, 0xf0, 0xdc)));
-                if ui.button("Undo (Ctrl+Z)").clicked() {
+                ui.label(RichText::new(format!("{prefix}{}", toast.message)).color(fg));
+                if can_undo && ui.button("Undo (Ctrl+Z)").clicked() {
                     self.undo_toast();
                 }
             });
         });
+    }
+
+    fn show_info_toast(&mut self, message: impl Into<String>) {
+        self.toast = Some(UndoToast {
+            message: message.into(),
+            snapshot: Vec::new(),
+            until: Instant::now() + Duration::from_secs(6),
+        });
+    }
+
+    fn reveal_in_explorer(&mut self, path: &Path) {
+        match plan_reveal(path) {
+            RevealPlan::Missing => self.show_info_toast("Output folder doesn't exist yet"),
+            plan => {
+                if let Err(e) = spawn_reveal(&plan) {
+                    self.show_info_toast(format!("Couldn't open in Explorer ({e})"));
+                }
+            }
+        }
     }
 
     pub fn undo_toast(&mut self) {
@@ -1105,4 +1152,133 @@ fn parse_try_screen(text: &str) -> (String, u32, u32) {
         return (t.to_string(), w, h);
     }
     (t.to_string(), 0, 0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RevealPlan {
+    Select(PathBuf),
+    OpenDir(PathBuf),
+    Missing,
+}
+
+/// Decide whether to select the file, open its folder, or give up.
+/// Never creates files or folders.
+fn plan_reveal(path: &Path) -> RevealPlan {
+    if path.exists() {
+        if path.is_dir() {
+            return RevealPlan::OpenDir(path.to_path_buf());
+        }
+        return RevealPlan::Select(path.to_path_buf());
+    }
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() && dir.is_dir() => RevealPlan::OpenDir(dir.to_path_buf()),
+        _ => RevealPlan::Missing,
+    }
+}
+
+fn spawn_reveal(plan: &RevealPlan) -> Result<(), String> {
+    match plan {
+        RevealPlan::Missing => Err("Output folder doesn't exist yet".into()),
+        RevealPlan::Select(p) => spawn_select_file(p),
+        RevealPlan::OpenDir(p) => spawn_open_dir(p),
+    }
+}
+
+fn spawn_detached(mut cmd: Command) -> Result<(), String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn spawn_select_file(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new("explorer.exe");
+    cmd.raw_arg(format!(r#"/select,"{}""#, path.display()));
+    spawn_detached(cmd)
+}
+
+#[cfg(windows)]
+fn spawn_open_dir(path: &Path) -> Result<(), String> {
+    let mut cmd = Command::new("explorer.exe");
+    cmd.arg(path);
+    spawn_detached(cmd)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_select_file(path: &Path) -> Result<(), String> {
+    spawn_detached({
+        let mut cmd = Command::new("open");
+        cmd.arg("-R").arg(path);
+        cmd
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_open_dir(path: &Path) -> Result<(), String> {
+    spawn_detached({
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_select_file(path: &Path) -> Result<(), String> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(path);
+    spawn_open_dir(dir)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_open_dir(path: &Path) -> Result<(), String> {
+    spawn_detached({
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd
+    })
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_root() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ec-reveal-{}-{}", std::process::id(), encodecraft_queue::unix_ms()));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn selects_existing_file() {
+        let dir = tmp_root();
+        let file = dir.join("clip.mp4");
+        let Ok(()) = fs::write(&file, b"x") else {
+            return;
+        };
+        assert_eq!(plan_reveal(&file), RevealPlan::Select(file));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opens_parent_when_file_not_rendered() {
+        let dir = tmp_root();
+        let file = dir.join("not-rendered.mp4");
+        assert_eq!(plan_reveal(&file), RevealPlan::OpenDir(dir.clone()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_when_folder_absent() {
+        let dir = tmp_root();
+        let file = dir.join("no-such-folder").join("clip.mp4");
+        assert_eq!(plan_reveal(&file), RevealPlan::Missing);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opens_directory_path() {
+        let dir = tmp_root();
+        assert_eq!(plan_reveal(&dir), RevealPlan::OpenDir(dir.clone()));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

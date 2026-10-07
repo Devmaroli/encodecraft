@@ -117,8 +117,8 @@ split After Effects / Media Encoder uses.
 `system.prores-mov` `system.webm-vp9` `system.gif`
 `system.png-sequence` `system.jpeg-sequence` `system.aac` `system.wav` `system.mp3`
 
-Studio H.264: **Better Res** is High @ 25 fps CFR, VBR 2-pass 40/50 Mbps; **Installation**
-is the same at 15/20 Mbps. Canvases with any side > 4096 use H.264 level 6.2. If the
+Studio H.264: **Better Res** is High @ 25 fps CFR, VBR 2-pass 7/8 Mbps; **Installation**
+is the same at 5/6 Mbps. Canvases with any side > 4096 use H.264 level 6.2. If the
 frame exceeds level 6.2, the queue item is flagged in-app instead of failing silently.
 
 ## Inbox fallback

@@ -695,7 +695,7 @@ impl EncodeApp {
             if ui.button("CRF / bitrate / 2-pass").clicked() {
                 job.preset.video.quality = match job.preset.video.quality {
                     Quality::Crf { .. } => Quality::bitrate(5000),
-                    Quality::Bitrate { .. } => Quality::vbr_2pass(15.0, 20.0),
+                    Quality::Bitrate { .. } => Quality::vbr_2pass(5.0, 6.0),
                     _ => Quality::crf(23),
                 };
             }

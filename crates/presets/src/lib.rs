@@ -569,8 +569,8 @@ fn slugify(s: &str) -> String {
 pub fn builtin_presets() -> Vec<ExportPreset> {
     vec![
         preset("system.h264-mp4", "H.264 Match Source", OutputFormat::H264Mp4, Quality::crf(23), true),
-        studio_h264(BETTER_RES_ID, "Better Res", 40.0, 50.0),
-        studio_h264(INSTALLATION_ID, "Installation", 15.0, 20.0),
+        studio_h264(BETTER_RES_ID, "Better Res", 7.0, 8.0),
+        studio_h264(INSTALLATION_ID, "Installation", 5.0, 6.0),
         preset("system.hevc-mp4", "HEVC Match Source", OutputFormat::HevcMp4, Quality::crf(28), true),
         {
             let mut p = preset("system.prores-mov", "Apple ProRes 422", OutputFormat::ProResMov, Quality::Quality { value: 80 }, true);
@@ -780,10 +780,10 @@ mod tests {
         assert_eq!(br.name, "Better Res");
         assert_eq!(br.video.frame_rate, FrameRate::Custom(25.0));
         assert_eq!(br.video.h264_profile.as_deref(), Some("high"));
-        assert_eq!(br.video.quality, Quality::vbr_2pass(40.0, 50.0));
+        assert_eq!(br.video.quality, Quality::vbr_2pass(7.0, 8.0));
         let inst = lib.get(INSTALLATION_ID).unwrap();
         assert_eq!(inst.name, "Installation");
-        assert_eq!(inst.video.quality, Quality::vbr_2pass(15.0, 20.0));
+        assert_eq!(inst.video.quality, Quality::vbr_2pass(5.0, 6.0));
     }
 
     #[test]

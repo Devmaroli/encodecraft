@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn better_res_is_high_2pass_40mbps() {
+    fn better_res_is_high_2pass_7mbps() {
         let lib = PresetLibrary::new();
         let mut p = lib.get("system.better-res").unwrap();
         p.video.width = Some(1920);
@@ -603,8 +603,8 @@ mod tests {
         let p1 = plans[0].args.join(" ");
         let p2 = plans[1].args.join(" ");
         assert!(p1.contains("-profile:v high"));
-        assert!(p1.contains("-b:v 40000k"));
-        assert!(p1.contains("-maxrate 50000k"));
+        assert!(p1.contains("-b:v 7000k"));
+        assert!(p1.contains("-maxrate 8000k"));
         assert!(p1.contains("-pass 1"));
         assert!(p1.contains("-an"));
         assert!(p1.contains("-f null"));
@@ -627,8 +627,8 @@ mod tests {
         })
         .args
         .join(" ");
-        assert!(s.contains("-b:v 15000k"));
-        assert!(s.contains("-maxrate 20000k"));
+        assert!(s.contains("-b:v 5000k"));
+        assert!(s.contains("-maxrate 6000k"));
     }
 
     #[test]

@@ -1,9 +1,13 @@
 # App icon (swap in)
 
-The **Format E** mark is the approved shape. Colour is still being chosen — do
-not embed a palette until the final files arrive.
+**Format E** (isometric `E` on a rounded square) is the approved shape. Colour is
+still being chosen, so it is **not** compiled into the Windows exe yet.
 
-Drop the chosen assets here, then rebuild:
+The teal candidate lives in [`format-e/`](format-e/) (`.ico`, PNGs 16–1024, SVG
+masters). Do not copy those files to the names below until the final colour
+arrives.
+
+To embed, drop the chosen colour here and rebuild:
 
 | file | used for |
 | --- | --- |
@@ -11,5 +15,5 @@ Drop the chosen assets here, then rebuild:
 | `encodecraft-256.png` | egui/eframe window icon (title bar / taskbar). `encodecraft-64.png` is used if 256 is missing. |
 
 `apps/encodecraft/build.rs`, `apps/encodecraft-cli/build.rs`, and
-`crates/ui-egui/build.rs` pick these up automatically. If the files are absent,
-the build stays icon-less (no default artwork is compiled in).
+`crates/ui-egui/build.rs` pick those two filenames up automatically. If they are
+absent, the build stays icon-less.

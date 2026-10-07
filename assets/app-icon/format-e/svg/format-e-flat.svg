@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+<clipPath id="t"><rect width="1024" height="1024" rx="224"/></clipPath>
+<pattern id="hatch" patternUnits="userSpaceOnUse" width="14" height="14" patternTransform="rotate(45)">
+<rect width="14" height="14" fill="#efe9dc"/><rect width="6" height="14" fill="#0b0b0c"/></pattern>
+</defs>
+<g clip-path="url(#t)"><rect width="1024" height="1024" fill="#0e968c"/>
+<polygon points="264,232 382.22,232 382.22,840 264,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="224,192 342.22,192 382.22,232 264,232" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="342.22,192 342.22,800 382.22,840 382.22,232" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="342.22,800 224,800 264,840 382.22,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="224,800 224,192 264,232 264,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="406.22,232 831.82,232 831.82,350.22 406.22,350.22" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,192 791.82,192 831.82,232 406.22,232" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="791.82,192 791.82,310.22 831.82,350.22 831.82,232" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="791.82,310.22 366.22,310.22 406.22,350.22 831.82,350.22" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,310.22 366.22,192 406.22,232 406.22,350.22" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="406.22,476.89 713.13,476.89 772.24,536 713.13,595.11 406.22,595.11" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,436.89 673.13,436.89 713.13,476.89 406.22,476.89" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="673.13,436.89 732.24,496 772.24,536 713.13,476.89" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="732.24,496 673.13,555.11 713.13,595.11 772.24,536" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="673.13,555.11 366.22,555.11 406.22,595.11 713.13,595.11" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,555.11 366.22,436.89 406.22,476.89 406.22,595.11" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="406.22,721.78 831.82,721.78 831.82,840 406.22,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,681.78 791.82,681.78 831.82,721.78 406.22,721.78" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="791.82,681.78 791.82,800 831.82,840 831.82,721.78" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="791.82,800 366.22,800 406.22,840 831.82,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,800 366.22,681.78 406.22,721.78 406.22,840" fill="#0b0b0c" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="224,192 342.22,192 342.22,800 224,800" fill="#efe9dc" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,192 791.82,192 791.82,310.22 366.22,310.22" fill="#efe9dc" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,436.89 673.13,436.89 732.24,496 673.13,555.11 366.22,555.11" fill="#efe9dc" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+<polygon points="366.22,681.78 791.82,681.78 791.82,800 366.22,800" fill="#efe9dc" stroke="#0b0b0c" stroke-width="12" stroke-linejoin="round"/>
+</g></svg>

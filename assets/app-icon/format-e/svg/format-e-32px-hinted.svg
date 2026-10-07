@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+<defs>
+<clipPath id="t"><rect width="32" height="32" rx="7"/></clipPath>
+<pattern id="hatch" patternUnits="userSpaceOnUse" width="14" height="14" patternTransform="rotate(45)">
+<rect width="14" height="14" fill="#efe9dc"/><rect width="6" height="14" fill="#0b0b0c"/></pattern>
+</defs>
+<g clip-path="url(#t)"><rect width="32" height="32" fill="#0e968c"/>
+<polygon points="7,6 11,6 11,26 7,26" fill="#0b0b0c"/>
+<polygon points="6,5 10,5 11,6 7,6" fill="#0b0b0c"/>
+<polygon points="10,5 10,25 11,26 11,6" fill="#0b0b0c"/>
+<polygon points="10,25 6,25 7,26 11,26" fill="#0b0b0c"/>
+<polygon points="6,25 6,5 7,6 7,26" fill="#0b0b0c"/>
+<polygon points="12,6 26,6 26,10 12,10" fill="#0b0b0c"/>
+<polygon points="11,5 25,5 26,6 12,6" fill="#0b0b0c"/>
+<polygon points="25,5 25,9 26,10 26,6" fill="#0b0b0c"/>
+<polygon points="25,9 11,9 12,10 26,10" fill="#0b0b0c"/>
+<polygon points="11,9 11,5 12,6 12,10" fill="#0b0b0c"/>
+<polygon points="12,14 21,14 23,16 21,18 12,18" fill="#0b0b0c"/>
+<polygon points="11,13 20,13 21,14 12,14" fill="#0b0b0c"/>
+<polygon points="20,13 22,15 23,16 21,14" fill="#0b0b0c"/>
+<polygon points="22,15 20,17 21,18 23,16" fill="#0b0b0c"/>
+<polygon points="20,17 11,17 12,18 21,18" fill="#0b0b0c"/>
+<polygon points="11,17 11,13 12,14 12,18" fill="#0b0b0c"/>
+<polygon points="12,22 26,22 26,26 12,26" fill="#0b0b0c"/>
+<polygon points="11,21 25,21 26,22 12,22" fill="#0b0b0c"/>
+<polygon points="25,21 25,25 26,26 26,22" fill="#0b0b0c"/>
+<polygon points="25,25 11,25 12,26 26,26" fill="#0b0b0c"/>
+<polygon points="11,25 11,21 12,22 12,26" fill="#0b0b0c"/>
+<polygon points="6,5 10,5 10,25 6,25" fill="#efe9dc"/>
+<polygon points="11,5 25,5 25,9 11,9" fill="#efe9dc"/>
+<polygon points="11,13 20,13 22,15 20,17 11,17" fill="#efe9dc"/>
+<polygon points="11,21 25,21 25,25 11,25" fill="#efe9dc"/>
+</g></svg>

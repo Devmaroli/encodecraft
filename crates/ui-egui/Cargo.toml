@@ -16,6 +16,7 @@ encodecraft-ffmpeg = { workspace = true }
 encodecraft-queue = { workspace = true }
 encodecraft-engine = { workspace = true }
 egui = { workspace = true }
+egui_dock = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "glow"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -13,7 +13,7 @@ use encodecraft_presets::{
 use encodecraft_queue::{Job, JobStatus};
 
 use crate::theme::Tokens;
-use crate::{BottomTab, EncodeApp};
+use crate::EncodeApp;
 
 #[derive(Clone)]
 pub struct UndoToast {
@@ -54,7 +54,7 @@ impl EncodeApp {
             if better + inst > 0 {
                 ui.separator();
                 studio_count_chip(ui, t.warning, &format!("{better} × Better Res"));
-                studio_count_chip(ui, t.accent, &format!("{inst} × Installation"));
+                studio_count_chip(ui, t.link, &format!("{inst} × Installation"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new("Renders top to bottom · drag rows to change the order").color(t.text_faint).italics().size(12.0));
@@ -127,6 +127,9 @@ impl EncodeApp {
         });
         let dragging_self = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.is_source && d.source_key == g.key);
         ui.painter().rect_filled(rect, CornerRadius::ZERO, t.header_bg);
+        if g.job_ids.iter().any(|id| self.selected_ids.contains(id)) {
+            ui.painter().vline(rect.left() + 1.5, rect.y_range(), Stroke::new(3.0_f32, t.accent));
+        }
         if dragging_self {
             ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(8, 10, 14, 170));
         }
@@ -211,6 +214,14 @@ impl EncodeApp {
             job_ids: vec![job.id.clone()],
         });
         ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
+        if selected {
+            ui.painter().vline(rect.left() + 1.5, rect.y_range(), Stroke::new(3.0_f32, t.accent));
+        }
+        if job.status == JobStatus::Encoding && job.progress.percent > 0.0 {
+            let w = rect.width() * (job.progress.percent / 100.0).clamp(0.0, 1.0);
+            let bar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 3.0), Pos2::new(rect.left() + w, rect.bottom()));
+            ui.painter().rect_filled(bar, CornerRadius::ZERO, t.accent);
+        }
         if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.iter().any(|id| *id == job.id)) {
             ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(8, 10, 14, 170));
         }
@@ -251,7 +262,7 @@ impl EncodeApp {
             self.handle.lock(|s| s.selected = Some(job.id.clone()));
         }
         if resp.double_clicked() {
-            self.bottom_tab = BottomTab::Encode;
+            self.layout.focused = Some(crate::dock::PanelKind::Encoding);
         }
         let cols = col_layout(rect);
         let mut src_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.src).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -278,7 +289,7 @@ impl EncodeApp {
         });
         let mut fmt_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.fmt).layout(egui::Layout::left_to_right(egui::Align::Center)));
         fmt_ui.horizontal(|ui| {
-            let r = ui.add(egui::Label::new(RichText::new(format!("{} v", job.preset.format.short_label())).color(t.accent).size(12.5)).sense(Sense::click()));
+            let r = ui.add(egui::Label::new(RichText::new(format!("{} v", job.preset.format.short_label())).color(t.link).size(12.5)).sense(Sense::click()));
             if r.clicked() {
                 self.format_popup_for = Some(job.id.clone());
                 self.popup_anchor = Some(r.rect.left_bottom());
@@ -287,7 +298,7 @@ impl EncodeApp {
         let mut pr_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.preset).layout(egui::Layout::left_to_right(egui::Align::Center)));
         pr_ui.horizontal(|ui| {
             preset_dot(ui, &job.preset.id, &t);
-            let r = ui.add(egui::Label::new(RichText::new(format!("{} v", job.preset.name)).color(t.accent).size(12.5)).sense(Sense::click()));
+            let r = ui.add(egui::Label::new(RichText::new(format!("{} v", job.preset.name)).color(t.link).size(12.5)).sense(Sense::click()));
             if r.clicked() {
                 self.preset_popup_for = Some(job.id.clone());
                 self.preset_search.clear();
@@ -295,7 +306,7 @@ impl EncodeApp {
             }
             assignment_tag(ui, job, &t);
             if job.preset_overridden {
-                let reset = ui.add(egui::Label::new(RichText::new("↺ Auto").color(t.accent).size(11.0)).sense(Sense::click()));
+                let reset = ui.add(egui::Label::new(RichText::new("↺ Auto").color(t.link).size(11.0)).sense(Sense::click()));
                 if reset.clicked() {
                     let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job.id.clone()]));
                     self.handle.mark_dirty();
@@ -306,13 +317,13 @@ impl EncodeApp {
         let out_label = job.output.to_string_lossy().into_owned();
         let folder_tip = job.output.parent().map(|p| p.display().to_string()).unwrap_or_else(|| out_label.clone());
         let out_r = out_ui.add(
-            egui::Label::new(RichText::new(out_label).size(11.0).color(t.accent))
+            egui::Label::new(RichText::new(out_label).size(11.0).color(t.link))
                 .truncate()
                 .sense(Sense::click()),
         );
         let out_r = out_r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{folder_tip}\nOpen in File Explorer"));
         if out_r.hovered() {
-            out_ui.painter().hline(out_r.rect.x_range(), out_r.rect.bottom() - 3.0, Stroke::new(1.0_f32, t.accent));
+            out_ui.painter().hline(out_r.rect.x_range(), out_r.rect.bottom() - 3.0, Stroke::new(1.0_f32, t.link));
         }
         if out_r.clicked() {
             self.reveal_in_explorer(&job.output);
@@ -771,7 +782,7 @@ impl EncodeApp {
         let filter = self.preset_filter.to_ascii_lowercase();
         let nsel = self.selected_ids.len();
         if nsel > 0 {
-            ui.label(RichText::new(format!("{nsel} output{} selected", if nsel == 1 { "" } else { "s" })).small().color(t.accent));
+            ui.label(RichText::new(format!("{nsel} output{} selected", if nsel == 1 { "" } else { "s" })).small().color(t.link));
         }
         let presets = self.handle.lock(|s| s.presets.all());
         let browsing = self.browser_selected.clone();
@@ -870,7 +881,7 @@ impl EncodeApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&p.name).strong());
             if PresetLibrary::is_studio_system(&p.id) {
-                ui.label(RichText::new("Studio preset").small().color(t.accent));
+                ui.label(RichText::new("Studio preset").small().color(t.link));
             }
         });
         ui.label(RichText::new(format!("Format    {}", p.format.label())).small());
@@ -913,7 +924,7 @@ impl EncodeApp {
             let title = format!("Preset Settings — {}", p.name);
             egui::Window::new(title).open(&mut open).default_width(520.0).show(ctx, |ui| {
                 if PresetLibrary::is_studio_system(&p.id) {
-                    ui.label(RichText::new("Studio preset").color(t.accent).small());
+                    ui.label(RichText::new("Studio preset").color(t.link).small());
                 }
                 ui.horizontal(|ui| {
                     ui.label("Name");
@@ -1073,7 +1084,7 @@ impl EncodeApp {
             let mut names = self.handle.lock(|s| s.presets.screen_rules.ultra_wide_names.clone());
             ui.horizontal(|ui| {
                 for (i, n) in names.clone().iter().enumerate() {
-                    ui.label(RichText::new(n).small().color(t.accent));
+                    ui.label(RichText::new(n).small().color(t.link));
                     if ui.small_button("×").clicked() {
                         names.remove(i);
                         self.handle.lock(|s| s.presets.screen_rules.ultra_wide_names = names.clone());
@@ -1147,7 +1158,7 @@ impl EncodeApp {
                 }
             });
             if let Some(r) = &self.try_result {
-                ui.label(RichText::new(r).color(t.accent));
+                ui.label(RichText::new(r).color(t.link));
             }
             ui.horizontal(|ui| {
                 if ui.button("Re-apply to Auto rows  ·  Manual rows stay").clicked() {
@@ -1274,7 +1285,7 @@ fn paint_insert_line(painter: &Painter, rect: Rect, top: bool, accent: Color32, 
     let pill = Rect::from_center_size(tip_pos, Vec2::new(92.0, 18.0));
     painter.rect_filled(pill, CornerRadius::same(8), Color32::from_rgb(0x12, 0x1c, 0x2c));
     painter.rect_stroke(pill, CornerRadius::same(8), Stroke::new(1.0_f32, accent), StrokeKind::Inside);
-    painter.text(tip_pos, Align2::CENTER_CENTER, tip, egui::FontId::proportional(11.0), accent);
+    painter.text(tip_pos, Align2::CENTER_CENTER, tip, egui::FontId::proportional(11.0), Color32::WHITE);
 }
 
 fn paint_forbidden(painter: &Painter, rect: Rect, msg: &str) {
@@ -1372,7 +1383,7 @@ fn studio_count_chip(ui: &mut Ui, color: Color32, text: &str) {
 fn preset_dot(ui: &mut Ui, id: &str, t: &Tokens) {
     let c = match id {
         BETTER_RES_ID => t.warning,
-        INSTALLATION_ID => t.accent,
+        INSTALLATION_ID => t.link,
         "system.approval-res" => Color32::from_rgb(0x5c, 0xc8, 0x8a),
         "system.sultan" => Color32::from_rgb(0xb0, 0x7c, 0xe8),
         _ => t.text_dim,

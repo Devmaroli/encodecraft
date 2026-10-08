@@ -20,7 +20,7 @@ pub use drops::{
     classify_dropped_paths, ecproj_comp_size, ecproj_comp_size_file, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop,
 };
 pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
-pub use paths::{data_dir, inbox_dir, set_home};
+pub use paths::{data_dir, inbox_dir, layout_path, set_home};
 pub use demo::{seed_preset_ui_demo, seed_stress_queue};
 pub use persist::Settings;
 pub use watch::WatchFolder;

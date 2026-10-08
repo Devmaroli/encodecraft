@@ -2,6 +2,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod dock;
 mod panels;
 mod perf;
 mod theme;
@@ -17,15 +18,21 @@ use encodecraft_job::{ScaleMode, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
+use crate::dock::{DockCmd, LayoutSession, PanelKind};
 use crate::theme::{ThemeKind, Tokens};
 
 pub struct EncodeApp {
     pub(crate) handle: Handle,
     pub(crate) tokens: Tokens,
-    pub(crate) bottom_tab: BottomTab,
+    pub(crate) layout: LayoutSession,
+    pub(crate) pending: Vec<DockCmd>,
     pub(crate) preset_filter: String,
     log_filter: String,
-    show_watch: bool,
+    pub(crate) show_save_as: bool,
+    pub(crate) save_as_name: String,
+    pub(crate) show_manage: bool,
+    pub(crate) rename_idx: Option<usize>,
+    pub(crate) rename_buf: String,
     pub(crate) show_preset_edit: bool,
     show_about: bool,
     pub(crate) edit_preset: Option<ExportPreset>,
@@ -66,14 +73,6 @@ struct EcprojPicker {
     parse_note: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BottomTab {
-    Encode,
-    Preview,
-    Log,
-    Settings,
-}
-
 impl EncodeApp {
     pub fn new(handle: Handle) -> Self {
         if std::env::var("ENCODECRAFT_DEMO").ok().as_deref() == Some("1") {
@@ -99,10 +98,15 @@ impl EncodeApp {
         Self {
             handle,
             tokens: Tokens::for_kind(ThemeKind::Dark),
-            bottom_tab: BottomTab::Encode,
+            layout: LayoutSession::load(),
+            pending: Vec::new(),
             preset_filter: String::new(),
             log_filter: String::new(),
-            show_watch: false,
+            show_save_as: false,
+            save_as_name: String::new(),
+            show_manage: false,
+            rename_idx: None,
+            rename_buf: String::new(),
             show_preset_edit: false,
             show_about: false,
             edit_preset: None,
@@ -214,7 +218,8 @@ impl EncodeApp {
 
 impl eframe::App for EncodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
+        if ctx.input(|i| i.viewport().close_requested()) && ctx.viewport_id() == egui::ViewportId::ROOT {
+            self.layout.save_now();
             self.handle.shutdown();
             std::process::exit(0);
         }
@@ -226,6 +231,7 @@ impl eframe::App for EncodeApp {
         self.poll_background(ctx);
         self.refresh_snapshot();
         self.schedule_repaint(ctx);
+        self.handle_dock_keys(ctx);
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
             self.undo_toast();
@@ -241,10 +247,14 @@ impl eframe::App for EncodeApp {
 
         self.menu(ctx);
         self.toolbar(ctx);
+        self.workspace_bar(ctx);
         let t = self.t();
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.app_bg)).show(ctx, |ui| {
             self.show_workspace(ui);
         });
+        self.show_floats(ctx);
+        self.apply_dock_cmds(ctx);
+        self.layout.save_if_due();
         self.drop_notice_banner(ctx);
         self.ffmpeg_banner(ctx);
         self.dialogs(ctx);
@@ -263,6 +273,7 @@ impl eframe::App for EncodeApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.layout.save_now();
         self.handle.shutdown();
         std::process::exit(0);
     }
@@ -361,12 +372,12 @@ impl EncodeApp {
         let has_ecproj = hovered.iter().any(|f| f.path.as_ref().is_some_and(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ecproj"))));
         let screen = ctx.screen_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-overlay")));
-        let fill = Color32::from_rgba_unmultiplied(45, 140, 235, 42);
+        let fill = Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 42);
         painter.rect_filled(screen, CornerRadius::ZERO, fill);
         painter.rect_stroke(
             screen.shrink(10.0),
             CornerRadius::same(10),
-            Stroke::new(3.0_f32, Color32::from_rgb(0x2d, 0x8c, 0xeb)),
+            Stroke::new(3.0_f32, self.t().accent),
             StrokeKind::Inside,
         );
         let label = if has_ecproj {
@@ -446,10 +457,13 @@ impl EncodeApp {
                 });
                 ui.menu_button("Watch", |ui| {
                     if ui.button("Watch folders…").clicked() {
-                        self.show_watch = true;
+                        if !self.layout.panel_visible(PanelKind::WatchFolders) {
+                            self.pending.push(DockCmd::Toggle(PanelKind::WatchFolders));
+                        }
                         ui.close();
                     }
                 });
+                self.window_menu(ui);
                 ui.menu_button("Help", |ui| {
                     if ui.button("About EncodeCraft").clicked() {
                         self.show_about = true;
@@ -532,23 +546,16 @@ impl EncodeApp {
         );
     }
 
-    fn bottom(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.bottom_tab, BottomTab::Encode, "Encoding");
-            ui.selectable_value(&mut self.bottom_tab, BottomTab::Preview, "Source");
-            ui.selectable_value(&mut self.bottom_tab, BottomTab::Log, "Log");
-            ui.selectable_value(&mut self.bottom_tab, BottomTab::Settings, "Settings");
+    fn workspace_bar(&mut self, ctx: &egui::Context) {
+        let t = self.t();
+        egui::TopBottomPanel::top("workspace-bar").exact_height(30.0).frame(egui::Frame::NONE.fill(t.header_bg).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                self.workspace_switcher(ui);
+            });
         });
-        ui.separator();
-        match self.bottom_tab {
-            BottomTab::Encode => self.encode_panel(ui),
-            BottomTab::Preview => self.preview_panel(ui),
-            BottomTab::Log => self.log_panel(ui),
-            BottomTab::Settings => self.settings_panel(ui),
-        }
     }
 
-    fn encode_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn encode_panel(&mut self, ui: &mut Ui) {
         let t = self.t();
         let Some(mut job) = selected_job(&self.handle) else {
             ui.label(RichText::new("Select a queue item to edit export settings.").color(t.text_dim));
@@ -609,7 +616,7 @@ impl EncodeApp {
             }
             ui.separator();
             ui.label("Output");
-            ui.add(egui::Label::new(job.output.to_string_lossy().to_string()).truncate());
+            ui.add(egui::Label::new(RichText::new(job.output.to_string_lossy().to_string()).color(t.link)).truncate());
         });
         if let Some(w) = &job.encode_warning {
             ui.label(RichText::new(w).color(t.warning).size(12.0));
@@ -741,7 +748,7 @@ impl EncodeApp {
         }
     }
 
-    fn preview_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn preview_panel(&mut self, ui: &mut Ui) {
         let t = self.t();
         let Some(job) = selected_job(&self.handle) else {
             ui.label(RichText::new("Select a job to preview the source.").color(t.text_dim));
@@ -750,7 +757,7 @@ impl EncodeApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(job.source.display_name()).strong());
-                ui.label(job.source.path_hint().display().to_string());
+                ui.label(RichText::new(job.source.path_hint().display().to_string()).color(t.link));
                 if let (Some(w), Some(h)) = (job.preset.video.width, job.preset.video.height) {
                     if let Some(d) = job.duration_sec {
                         ui.label(format!("{w}×{h} · {}", encodecraft_ffmpeg::format_duration(d)));
@@ -765,7 +772,7 @@ impl EncodeApp {
                         ui.label("Reading source…");
                     });
                 }
-                ui.label(format!("-> {}", job.output.display()));
+                ui.label(RichText::new(format!("-> {}", job.output.display())).color(t.link));
             });
             ui.add_space(16.0);
             if let Some(tex) = self.ensure_thumb(ui.ctx(), &job) {
@@ -782,7 +789,7 @@ impl EncodeApp {
         });
     }
 
-    fn log_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn log_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Filter");
             ui.add(egui::TextEdit::singleline(&mut self.log_filter).desired_width(200.0));
@@ -817,7 +824,7 @@ impl EncodeApp {
         });
     }
 
-    fn settings_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn settings_panel(&mut self, ui: &mut Ui) {
         let mut s = self.handle.lock(|x| x.settings.clone());
         ui.label(RichText::new("Defaults").strong());
         ui.label("Default output folder");
@@ -916,9 +923,8 @@ impl EncodeApp {
                 ui.hyperlink("https://github.com/storytold/effectcraft");
             });
         }
-        if self.show_watch {
-            self.watch_dialog(ctx);
-        }
+        self.save_as_dialog(ctx);
+        self.manage_dialog(ctx);
         self.preset_edit_window(ctx);
         self.rules_window(ctx);
         self.screen_library_picker(ctx);
@@ -994,34 +1000,33 @@ impl EncodeApp {
         }
     }
 
-    fn watch_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_watch;
-        egui::Window::new("Watch folders").open(&mut open).resizable(true).default_width(520.0).show(ctx, |ui| {
-            ui.label("New files dropped into a watched folder are queued with the chosen preset.");
-            let mut folders = self.handle.lock(|s| s.settings.watch_folders.clone());
-            let mut remove = None;
-            for (i, w) in folders.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut w.enabled, "");
-                    ui.label(w.path.display().to_string());
-                    ui.add(egui::TextEdit::singleline(&mut w.preset_id).desired_width(160.0));
-                    if ui.button("Remove").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                folders.remove(i);
-            }
-            if ui.button("Add folder…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
-                    folders.push(encodecraft_engine::WatchFolder::new(p, preset));
+    pub(crate) fn watch_panel(&mut self, ui: &mut Ui) {
+        ui.label("New files dropped into a watched folder are queued with the chosen preset.");
+        let mut folders = self.handle.lock(|s| s.settings.watch_folders.clone());
+        let mut remove = None;
+        for (i, w) in folders.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut w.enabled, "");
+                ui.label(RichText::new(w.path.display().to_string()).color(self.t().link));
+                ui.add(egui::TextEdit::singleline(&mut w.preset_id).desired_width(160.0));
+                if ui.button("Remove").clicked() {
+                    remove = Some(i);
                 }
+            });
+        }
+        if let Some(i) = remove {
+            folders.remove(i);
+        }
+        if ui.button("Add folder…").clicked() {
+            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
+                folders.push(encodecraft_engine::WatchFolder::new(p, preset));
             }
-            self.handle.lock(|s| s.settings.watch_folders = folders);
-        });
-        self.show_watch = open;
+        }
+        if folders.is_empty() {
+            ui.label(RichText::new("No folders yet. Add a folder to watch, or drop a directory onto the queue.").color(self.t().text_dim));
+        }
+        self.handle.lock(|s| s.settings.watch_folders = folders);
     }
 
     pub(crate) fn pick_sources(&mut self) {
@@ -1073,7 +1078,7 @@ fn selected_job(h: &Handle) -> Option<Job> {
 pub(crate) fn status_color(st: JobStatus, t: &Tokens) -> Color32 {
     match st {
         JobStatus::Waiting => t.text_dim,
-        JobStatus::Encoding => t.accent,
+        JobStatus::Encoding => t.text,
         JobStatus::Paused => t.warning,
         JobStatus::Done => t.cache_green,
         JobStatus::Failed => t.danger,

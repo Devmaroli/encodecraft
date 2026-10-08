@@ -27,6 +27,7 @@ directories = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 egui = "0.32"
+egui_dock = { version = "0.17", features = ["serde"] }
 eframe = { version = "0.32", default-features = false }
 rfd = "0.15"
 

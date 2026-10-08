@@ -59,6 +59,11 @@ pub fn lock_path() -> PathBuf {
     data_dir().join("encoder.lock")
 }
 
+/// Dock tree, floating windows, and named workspaces.
+pub fn layout_path() -> PathBuf {
+    config_dir().join("layout.json")
+}
+
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [data_dir(), inbox_dir(), work_dir(), thumbs_dir()] {
         std::fs::create_dir_all(d)?;

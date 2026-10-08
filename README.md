@@ -26,9 +26,11 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 - **DOOH / EffectCraft screen sizes**: automatic Better Res vs Installation from screen name/size (ultra-wide, listed screens including Eye of Kuwait, Al Salam Sync, Piccadilly; editable in the rules window). EffectCraft can still send several sizes in one enqueue.
 - Tall canvases (any side > 4096, e.g. 1008×5184) use H.264 **level 6.2**; frames H.264 cannot encode are flagged on the queue item
 - Output **naming** (`{name}_{width}x{height}`). Default destination is an `Output` folder next to the EffectCraft project or dropped file (Settings can use a fixed folder instead)
-- **Watch folders**
+- **Watch folders** (dockable panel)
+- **Dockable panels and workspaces** (After Effects-style): drag a panel tab to left / right / top / bottom / center, or ☰ → Pop out for a real OS window. Window menu (Ctrl+1–7), workspace switcher (Full, Queue only, Presets + Queue, Alt+Shift+1–3), user layouts with thumbnails. Layout, floating windows and monitor are remembered on close; missing monitors dock floats back.
+- **Palette B** Neutral warm dark: background `#1B1B1D`, panels `#232326`, Cobalt `#2448F5` fills only (primary buttons, active tab, progress, selected edge). Links and paths use `#8EA2FF`.
 - Per-job percent / ETA / speed, log, source thumbnail. The UI thread never waits on FFmpeg; lists are virtualized for 500+ outputs.
-- Queue, presets and settings **persist** between runs
+- Queue, presets, settings and **panel layout** persist between runs
 - **EffectCraft handoff**: `POST /v1/enqueue` on `127.0.0.1:9878`, CLI `enqueue`, inbox drop if the app is not running — see [docs/effectcraft-integration.md](docs/effectcraft-integration.md)
 
 ## Requirements
@@ -115,7 +117,7 @@ Tests:
 cargo test --workspace
 ```
 
-Data dir (queue / presets / inbox / `ipc-token`): `%APPDATA%\EncodeCraft\EncodeCraft\data` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. A `portable.txt` next to the executable switches that to `<exe folder>/data`. Override with `ENCODECRAFT_HOME`.
+Data dir (queue / presets / layout / inbox / `ipc-token`): `%APPDATA%\EncodeCraft\EncodeCraft\data` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. A `portable.txt` next to the executable switches that to `<exe folder>/data`. Override with `ENCODECRAFT_HOME`.
 
 ## EffectCraft
 

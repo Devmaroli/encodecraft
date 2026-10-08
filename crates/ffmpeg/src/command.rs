@@ -783,6 +783,26 @@ mod tests {
     }
 
     #[test]
+    fn approval_res_is_aac_320k_48k_stereo_not_silent() {
+        let lib = PresetLibrary::new();
+        let p = lib.get("system.approval-res").unwrap();
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        });
+        let s = plans.last().unwrap().args.join(" ");
+        assert!(s.contains("-c:a aac"), "{s}");
+        assert!(s.contains("-b:a 320k"), "{s}");
+        assert!(s.contains("-ar 48000"), "{s}");
+        assert!(s.contains("-ac 2"), "{s}");
+        assert!(!s.contains("-an"), "{s}");
+    }
+
+    #[test]
     fn nvenc_uses_h264_nvenc_single_pass() {
         let lib = PresetLibrary::new();
         let mut p = lib.get("system.better-res").unwrap();

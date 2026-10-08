@@ -15,6 +15,24 @@ pub fn default_template() -> &'static str {
     "{comp}"
 }
 
+/// Old EncodeCraft default. EffectCraft and leftover `settings.json` still send this.
+pub fn is_legacy_default_template(template: &str) -> bool {
+    matches!(
+        template.trim(),
+        "{name}_{width}x{height}" | "{name}_{width}X{height}" | "{name}_{width}×{height}"
+    )
+}
+
+/// Per-request `naming` wins, except EffectCraft still sending the old EncodeCraft default.
+pub fn effective_naming<'a>(request: Option<&'a str>, settings: &'a str, ignore_legacy_request: bool) -> &'a str {
+    let settings = if settings.trim().is_empty() { default_template() } else { settings.trim() };
+    match request.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(t) if ignore_legacy_request && is_legacy_default_template(t) => settings,
+        Some(t) => t,
+        None => settings,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NamingContext {
     pub name: String,
@@ -217,7 +235,7 @@ pub fn constrain_output_dir(requested: Option<&Path>, configured: &Path) -> Resu
     }
 }
 
-/// If `path` already exists and overwrites are off, append `-2`, `-3`, …
+/// If `path` already exists and overwrites are off, append ` (2)`, ` (3)`, …
 pub fn unique_output_path(path: PathBuf, overwrite: bool) -> PathBuf {
     if overwrite {
         return path;
@@ -345,6 +363,16 @@ mod tests {
         assert!(is_under(&ok, root));
         let abs = constrain_output_dir(Some(Path::new("/home/user/EncodeCraft/batch")), root).unwrap();
         assert_eq!(normalize_path(&abs), normalize_path(&root.join("batch")));
+    }
+
+    #[test]
+    fn legacy_size_template_is_ignored_for_default() {
+        assert!(is_legacy_default_template("{name}_{width}x{height}"));
+        assert_eq!(effective_naming(Some("{name}_{width}x{height}"), "{comp}", true), "{comp}");
+        assert_eq!(effective_naming(Some("{name}_{width}x{height}"), "{comp}", false), "{name}_{width}x{height}");
+        assert_eq!(effective_naming(None, "{comp}", true), "{comp}");
+        assert_eq!(effective_naming(Some("{project}_{comp}"), "{comp}", true), "{project}_{comp}");
+        assert_eq!(effective_naming(None, "{name}_{width}x{height}", false), "{name}_{width}x{height}");
     }
 
     #[test]

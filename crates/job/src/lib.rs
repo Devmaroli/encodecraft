@@ -352,7 +352,7 @@ pub struct EnqueueRequest {
     pub preset_override: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_dir: Option<PathBuf>,
-    /// Output file name template, e.g. `{name}_{width}x{height}`.
+    /// Output file name template. Omitted or the old `{name}_{width}x{height}` default uses Settings (`{comp}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming: Option<String>,
     /// When non-empty, one queue item is created per size.

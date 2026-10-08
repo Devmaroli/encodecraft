@@ -49,7 +49,7 @@ Unknown schema values return HTTP 400 with a readable error.
   "source": { "kind": "file", "path": "C:/ads/hero.mov" },
   "preset_id": "system.h264-mp4",
   "output_dir": "C:/exports",
-  "naming": "{name}_{width}x{height}",
+  "naming": "{comp}",
   "sizes": [
     { "name": "FHD Landscape", "width": 1920, "height": 1080 },
     { "name": "FHD Portrait", "width": 1080, "height": 1920 },

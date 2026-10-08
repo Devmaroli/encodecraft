@@ -32,7 +32,7 @@ pub struct Settings {
     pub auto_start_queue: bool,
     #[serde(default)]
     pub watch_folders: Vec<WatchFolder>,
-    /// When false (default), existing output files get a `-2` suffix instead of being replaced.
+    /// When false (default), existing output files get a ` (2)` suffix instead of being replaced.
     #[serde(default)]
     pub allow_overwrite: bool,
     /// Kill FFmpeg if it prints nothing for this many seconds.
@@ -93,7 +93,12 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        crate::fsutil::load_json_or_quarantine(path).unwrap_or_default()
+        let mut s: Self = crate::fsutil::load_json_or_quarantine(path).unwrap_or_default();
+        if encodecraft_presets::is_legacy_default_template(&s.naming) {
+            s.naming = default_template().into();
+            let _ = s.save(path);
+        }
+        s
     }
 
     pub fn save(&self, path: &Path) -> Result<(), EngineError> {

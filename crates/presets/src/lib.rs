@@ -6,8 +6,8 @@ mod naming;
 mod screen_rules;
 
 pub use naming::{
-    apply_template, constrain_output_dir, default_template, is_under, naming_uses_size, normalize_path, output_path, sanitize_filename, unique_output_path,
-    NamingContext,
+    apply_template, constrain_output_dir, default_template, effective_naming, is_legacy_default_template, is_under, naming_uses_size, normalize_path,
+    output_path, sanitize_filename, unique_output_path, NamingContext,
 };
 pub use screen_rules::{
     infer_screen_from_text, normalize_screen_name, PresetPick, PresetReason, ScreenMatchRule, ScreenPresetRules,

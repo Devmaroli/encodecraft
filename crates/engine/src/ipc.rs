@@ -526,8 +526,14 @@ mod tests {
             ),
         );
         assert!(resp.contains("200") || resp.contains("\"ok\":true"), "{resp}");
-        let n = h.lock(|s| s.queue.jobs.len());
-        assert_eq!(n, 1);
+        assert!(resp.contains("1 job added · Start") || resp.contains("added · Start"), "{resp}");
+        h.lock(|s| {
+            assert!(!s.queue.running);
+            assert_eq!(s.queue.jobs.len(), 1);
+            assert_eq!(s.queue.jobs[0].status, encodecraft_queue::JobStatus::Waiting);
+            let name = s.queue.jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();
+            assert_eq!(name, "Main.mp4");
+        });
 
         let bad = r#"{"schema":"encodecraft.job/v9","source":{"kind":"file","path":"a.mp4"},"preset_id":"x"}"#;
         let resp = raw(

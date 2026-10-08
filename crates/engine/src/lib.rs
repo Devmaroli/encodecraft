@@ -878,7 +878,7 @@ mod tests {
                 preset_id: "system.h264-mp4".into(),
                 preset_override: None,
                 output_dir: None,
-                naming: None,
+                naming: Some("{name}_{width}x{height}".into()),
                 sizes: vec![],
                 trim: None,
                 scale: None,
@@ -890,9 +890,29 @@ mod tests {
             assert!(!s.queue.running, "queue must stay idle");
             assert_eq!(s.queue.jobs.len(), 2);
             assert!(s.queue.jobs.iter().all(|j| j.status == JobStatus::Waiting));
+            assert!(s.queue.next_waiting().is_some());
             let names: Vec<_> = s.queue.jobs.iter().map(|j| j.output.file_name().unwrap().to_string_lossy().into_owned()).collect();
             assert!(names.iter().any(|n| n == "A.mp4"), "{names:?}");
             assert!(names.iter().any(|n| n == "B.mp4"), "{names:?}");
+            assert!(names.iter().all(|n| !n.contains("1920")), "{names:?}");
+        });
+        let reply = h
+            .dispatch(
+                "enqueue",
+                &serde_json::json!({
+                    "schema": 1,
+                    "source": {"kind": "effectcraft", "project": project, "comp": "C"},
+                    "preset_id": "system.h264-mp4",
+                    "start_queue": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(reply["message"], "1 job added · Start");
+        assert_eq!(reply["running"], false);
+        h.lock(|s| {
+            assert!(!s.queue.running);
+            assert_eq!(s.queue.jobs.len(), 3);
+            assert!(s.queue.jobs.iter().all(|j| j.status == JobStatus::Waiting));
         });
     }
 
@@ -1015,6 +1035,19 @@ mod tests {
             JobSource::File { sequence_start, .. } => assert_eq!(*sequence_start, Some(1)),
             JobSource::EffectCraft { .. } => panic!("expected file sequence"),
         });
+    }
+
+    #[test]
+    fn migrates_legacy_naming_template_on_load() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        std::fs::write(home.join("settings.json"), r#"{"naming":"{name}_{width}x{height}"}"#).unwrap();
+        let h = Handle::open_core().unwrap();
+        assert_eq!(h.lock(|s| s.settings.naming.clone()), "{comp}");
+        let saved = std::fs::read_to_string(home.join("settings.json")).unwrap();
+        assert!(saved.contains("{comp}"), "{saved}");
+        assert!(!saved.contains("{name}_{width}x{height}"), "{saved}");
     }
 
     #[test]

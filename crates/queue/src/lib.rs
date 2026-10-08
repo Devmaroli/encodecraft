@@ -10,8 +10,8 @@ use encodecraft_ffmpeg::EncodeProgress;
 use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize, Trim};
 use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_presets::{
-    apply_template, constrain_output_dir, default_template, infer_screen_from_text, naming_uses_size, output_path, unique_output_path, ExportPreset,
-    NamingContext, PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
+    apply_template, constrain_output_dir, default_template, effective_naming, infer_screen_from_text, naming_uses_size, output_path, unique_output_path,
+    ExportPreset, NamingContext, PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
 };
 use serde::{Deserialize, Serialize};
 
@@ -478,7 +478,7 @@ impl EncodeQueue {
         }
         let trim = req.trim.unwrap_or_default();
         let scale = req.scale.unwrap_or(preset.video.scale);
-        let naming = req.naming.as_deref().unwrap_or(default_naming);
+        let naming = effective_naming(req.naming.as_deref(), default_naming, req.source.is_effectcraft());
         let out_dir = if clamp_output {
             constrain_output_dir(req.output_dir.as_deref(), default_out).map_err(QueueError::Message)?
         } else {
@@ -1015,8 +1015,12 @@ mod tests {
             preset_id: "system.h264-mp4".into(),
             preset_override: None,
             output_dir: Some(PathBuf::from("/out")),
-            naming: None,
-            sizes: Vec::new(),
+            naming: Some("{name}_{width}x{height}".into()),
+            sizes: vec![ScreenSize::new(
+                "Test / Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp Test.ecproj",
+                6880,
+                1032,
+            )],
             trim: None,
             scale: None,
             start_queue: true,
@@ -1027,7 +1031,10 @@ mod tests {
         assert!(!name.contains("Test"), "{name}");
         assert!(!name.contains("6880x1032"), "{name}");
         assert_eq!(jobs[0].status, JobStatus::Waiting);
-        assert_eq!(jobs[0].screen.as_ref().map(|s| s.name.as_str()), Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp"));
+        assert_eq!(
+            jobs[0].screen.as_ref().map(|s| s.name.as_str()),
+            Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp")
+        );
     }
 
     #[test]

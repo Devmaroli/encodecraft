@@ -39,11 +39,11 @@ How to use it
     automatically (ultra-wide and listed screens vs everything else). The queue
     shows which preset and why; you can override per item. Approval Res and
     Sultan are one-off: the next send of that comp goes back to Auto.
-  • For several screen sizes from one file (for example 1920×1080 and 1080×1920),
-    click  One -> many sizes.
   • Click  Start queue.
 
-Files are written to the output folder shown in Settings (Videos\EncodeCraft by default).
+Files are written to an Output folder next to the EffectCraft project (or next to a
+dropped file). Settings can switch that to a fixed folder. Click the blue path on
+a queue row to open it in File Explorer.
 
 The other program, encodecraft-cli.exe, is optional. It is a command-line tool for
 people who want to encode without opening the window. You can ignore it.

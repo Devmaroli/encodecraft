@@ -229,6 +229,12 @@ impl JobSource {
         }
     }
 
+    /// `Output` folder next to the `.ecproj` or dropped source file.
+    pub fn sidecar_output_dir(&self) -> PathBuf {
+        let parent = self.path_hint().parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        parent.join("Output")
+    }
+
     /// Group key so one EffectCraft project / one file shows as a parent row with child outputs.
     pub fn group_key(&self) -> String {
         match self {
@@ -698,6 +704,21 @@ mod tests {
         assert_eq!(lin[0], PathBuf::from("/home/ada/.local/share/encodecraft"));
         let xdg = linux_token_search_dirs("/home/ada", Some(PathBuf::from("/home/ada/.data")));
         assert_eq!(xdg[0], PathBuf::from("/home/ada/.data/encodecraft"));
+    }
+
+    #[test]
+    fn sidecar_output_dir_is_output_next_to_project_or_file() {
+        let ec = JobSource::EffectCraft {
+            project: PathBuf::from("/Users/ASUS/OneDrive/Desktop/test-2.ecproj"),
+            comp: Some("Main".into()),
+            mezzanine: "prores".into(),
+            work_area: false,
+            width: None,
+            height: None,
+        };
+        assert_eq!(ec.sidecar_output_dir(), PathBuf::from("/Users/ASUS/OneDrive/Desktop/Output"));
+        let file = JobSource::file("/Users/ASUS/Videos/clip.mov");
+        assert_eq!(file.sidecar_output_dir(), PathBuf::from("/Users/ASUS/Videos/Output"));
     }
 
     #[test]

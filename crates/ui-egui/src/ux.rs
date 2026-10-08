@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, CornerRadius, CursorIcon, Id, LayerId, Order, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use encodecraft_job::ScreenSize;
 use encodecraft_presets::{
     ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality, ScreenMatchRule, BETTER_RES_ID, INSTALLATION_ID,
@@ -18,7 +18,17 @@ use crate::{BottomTab, EncodeApp};
 pub struct UndoToast {
     pub message: String,
     pub snapshot: Vec<(String, ExportPreset, bool, Option<PresetReason>)>,
+    pub order: Option<Vec<String>>,
     pub until: Instant,
+}
+
+/// Queue row / source-group drag payload (distinct from preset-id `String` drops).
+#[derive(Clone, Debug)]
+pub struct QueueDrag {
+    pub ids: Vec<String>,
+    pub source_key: String,
+    pub is_source: bool,
+    pub label: String,
 }
 
 #[derive(Clone)]
@@ -46,7 +56,7 @@ impl EncodeApp {
                 studio_count_chip(ui, t.accent, &format!("{inst} × Installation"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Drop media or .ecproj here").color(t.text_faint).italics().size(12.0));
+                ui.label(RichText::new("Renders top to bottom · drag rows to change the order").color(t.text_faint).italics().size(12.0));
             });
         });
         ui.add_space(2.0);
@@ -79,6 +89,7 @@ impl EncodeApp {
             }
         });
         self.draw_toast(ui);
+        self.paint_queue_drag_layer(ui, &jobs);
         self.preset_popup(ui, &jobs);
         self.format_popup(ui, &jobs);
     }
@@ -86,11 +97,46 @@ impl EncodeApp {
     fn source_row(&mut self, ui: &mut Ui, g: &SourceGroup, jobs: &[Job], _order: &[String]) {
         let t = self.t();
         let w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::click());
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, t.header_bg);
+        let locked = group_has_locked(g, jobs);
+        let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), sense);
+        let dragging_self = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.is_source && d.source_key == g.key);
+        let mut bg = t.header_bg;
+        if dragging_self {
+            bg = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 70);
+        }
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
+        if !locked {
+            let drag = QueueDrag { ids: g.job_ids.clone(), source_key: g.key.clone(), is_source: true, label: g.title.clone() };
+            if resp.dragged() {
+                egui::DragAndDrop::set_payload(ui.ctx(), drag);
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
+        } else if resp.hovered() {
+            resp.clone().on_hover_text("Already rendering · can't be moved");
+        }
         if let Some(pid) = resp.dnd_hover_payload::<String>() {
             ui.painter().rect_stroke(rect, CornerRadius::ZERO, egui::Stroke::new(1.5_f32, t.accent), egui::StrokeKind::Inside);
             let _ = pid;
+        }
+        if let Some(qdrag) = resp.dnd_hover_payload::<QueueDrag>() {
+            let top = pointer_top_half(ui, rect);
+            if qdrag.is_source {
+                paint_insert_line(ui, rect, top, t.accent, drop_dest_for_source(jobs, g, &qdrag.ids, top));
+            } else {
+                paint_forbidden(ui, rect, "Outputs stay with their own source");
+            }
+        }
+        if let Some(qdrag) = resp.dnd_release_payload::<QueueDrag>() {
+            if qdrag.is_source {
+                let top = pointer_top_half(ui, rect);
+                let dest = drop_dest_for_source(jobs, g, &qdrag.ids, top);
+                self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
+            } else {
+                self.show_info_toast("Outputs stay with their own source");
+            }
         }
         if let Some(pid) = resp.dnd_release_payload::<String>() {
             if let Some(like) = g.job_ids.first() {
@@ -103,7 +149,7 @@ impl EncodeApp {
                 }
             }
         }
-        if resp.clicked() {
+        if resp.clicked() && !resp.dragged() {
             if self.collapsed.contains(&g.key) {
                 self.collapsed.remove(&g.key);
             } else {
@@ -113,6 +159,7 @@ impl EncodeApp {
         let collapsed = self.collapsed.contains(&g.key);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.horizontal(|ui| {
+            paint_grab_or_lock(ui, locked, &t);
             ui.label(RichText::new(if collapsed { ">" } else { "v" }).color(t.text_dim).strong());
             ui.label(RichText::new(&g.title).strong().color(t.tab_text_active));
             ui.label(RichText::new(&g.subtitle).color(t.text_dim).size(11.0));
@@ -137,22 +184,71 @@ impl EncodeApp {
                 ui.close();
             }
         });
-        let _ = jobs;
     }
 
     fn output_row(&mut self, ui: &mut Ui, job: &Job, order: &[String], all: &[Job]) {
         let t = self.t();
         let selected = self.selected_ids.contains(&job.id);
-        let bg = if selected {
-            t.row_selected
-        } else {
-            t.row
-        };
+        let locked = job.status.is_order_locked();
+        let src_key = job.source.group_key();
+        let mut bg = if selected { t.row_selected } else { t.row };
+        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.iter().any(|id| *id == job.id)) {
+            bg = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 70);
+        }
         let w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), Sense::click());
+        let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), sense);
         ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
+        if !locked {
+            let mut ids = vec![job.id.clone()];
+            if selected && self.selected_ids.len() > 1 {
+                ids = self.selected_ids.iter().filter(|id| all.iter().any(|j| j.id == **id && j.source.group_key() == src_key && !j.status.is_order_locked())).cloned().collect();
+                if ids.is_empty() {
+                    ids = vec![job.id.clone()];
+                }
+            }
+            let label = job.source.display_name();
+            let drag = QueueDrag { ids, source_key: src_key.clone(), is_source: false, label };
+            if resp.dragged() {
+                egui::DragAndDrop::set_payload(ui.ctx(), drag);
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
+        } else {
+            let _ = resp.clone().on_hover_text("Already rendering · can't be moved");
+        }
         if let Some(_) = resp.dnd_hover_payload::<String>() {
             ui.painter().rect_stroke(rect, CornerRadius::ZERO, egui::Stroke::new(1.5_f32, t.accent), egui::StrokeKind::Inside);
+        }
+        if let Some(qdrag) = resp.dnd_hover_payload::<QueueDrag>() {
+            let top = pointer_top_half(ui, rect);
+            if qdrag.is_source {
+                if let Some(g) = group_jobs(all).iter().find(|g| g.key == src_key) {
+                    paint_insert_line(ui, rect, top, t.accent, drop_dest_for_source(all, g, &qdrag.ids, top));
+                }
+            } else if qdrag.source_key != src_key {
+                paint_forbidden(ui, rect, "Outputs stay with their own source");
+            } else if locked && top {
+                paint_forbidden(ui, rect, "Already rendering · can't be moved");
+            } else {
+                let dest = drop_dest_for_output(all, &job.id, &qdrag.ids, top);
+                paint_insert_line(ui, rect, top, t.accent, dest);
+            }
+        }
+        if let Some(qdrag) = resp.dnd_release_payload::<QueueDrag>() {
+            let top = pointer_top_half(ui, rect);
+            if qdrag.is_source {
+                if let Some(g) = group_jobs(all).iter().find(|g| g.key == src_key) {
+                    let dest = drop_dest_for_source(all, g, &qdrag.ids, top);
+                    self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
+                }
+            } else if qdrag.source_key != src_key {
+                self.show_info_toast("Outputs stay with their own source");
+            } else if !(locked && top) {
+                let dest = drop_dest_for_output(all, &job.id, &qdrag.ids, top);
+                self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
+            }
         }
         if let Some(pid) = resp.dnd_release_payload::<String>() {
             let targets = if selected && self.selected_ids.len() > 1 {
@@ -163,7 +259,7 @@ impl EncodeApp {
             self.apply_preset_ids(&targets, pid.as_str());
         }
         let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-        if resp.clicked() {
+        if resp.clicked() && !resp.dragged() {
             self.click_select(&job.id, order, mods.0, mods.1);
             self.handle.lock(|s| s.selected = Some(job.id.clone()));
         }
@@ -173,7 +269,7 @@ impl EncodeApp {
         let cols = col_layout(rect);
         let mut src_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.src).layout(egui::Layout::left_to_right(egui::Align::Center)));
         src_ui.horizontal(|ui| {
-            ui.add_space(18.0);
+            paint_grab_or_lock(ui, locked, &t);
             preset_dot(ui, &job.preset.id, &t);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -220,13 +316,14 @@ impl EncodeApp {
             }
         });
         let mut out_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.out).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let out_label = job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let out_label = job.output.to_string_lossy().into_owned();
+        let folder_tip = job.output.parent().map(|p| p.display().to_string()).unwrap_or_else(|| out_label.clone());
         let out_r = out_ui.add(
             egui::Label::new(RichText::new(out_label).size(11.0).color(t.accent))
                 .truncate()
                 .sense(Sense::click()),
         );
-        let out_r = out_r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Open in File Explorer");
+        let out_r = out_r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{folder_tip}\nOpen in File Explorer"));
         if out_r.hovered() {
             out_ui.painter().hline(out_r.rect.x_range(), out_r.rect.bottom() - 3.0, Stroke::new(1.0_f32, t.accent));
         }
@@ -336,6 +433,7 @@ impl EncodeApp {
                 self.toast = Some(UndoToast {
                     message: format!("{name} applied to {n} output{} — tags now say Manual", if n == 1 { "" } else { "s" }),
                     snapshot: snap,
+                    order: None,
                     until: Instant::now() + Duration::from_secs(8),
                 });
                 self.handle.persist();
@@ -353,7 +451,7 @@ impl EncodeApp {
             self.toast = None;
             return;
         }
-        let can_undo = !toast.snapshot.is_empty();
+        let can_undo = !toast.snapshot.is_empty() || toast.order.is_some();
         let fill = if can_undo { Color32::from_rgb(0x2a, 0x5a, 0x38) } else { Color32::from_rgb(0x3a, 0x38, 0x28) };
         let fg = if can_undo { Color32::from_rgb(0xd8, 0xf0, 0xdc) } else { Color32::from_rgb(0xf0, 0xe8, 0xd0) };
         let prefix = if can_undo { "✓  " } else { "" };
@@ -371,26 +469,89 @@ impl EncodeApp {
         self.toast = Some(UndoToast {
             message: message.into(),
             snapshot: Vec::new(),
+            order: None,
             until: Instant::now() + Duration::from_secs(6),
         });
     }
 
     fn reveal_in_explorer(&mut self, path: &Path) {
         match plan_reveal(path) {
-            RevealPlan::Missing => self.show_info_toast("Output folder doesn't exist yet"),
-            plan => {
+            Ok(plan) => {
                 if let Err(e) = spawn_reveal(&plan) {
                     self.show_info_toast(format!("Couldn't open in Explorer ({e})"));
                 }
             }
+            Err(e) => self.show_info_toast(e),
         }
     }
 
     pub fn undo_toast(&mut self) {
         if let Some(t) = self.toast.take() {
-            self.handle.lock(|s| s.restore_preset_snapshot(&t.snapshot));
+            if let Some(order) = t.order {
+                self.handle.lock(|s| s.queue.restore_order(&order));
+                self.status = "Undid move".into();
+            } else {
+                self.handle.lock(|s| s.restore_preset_snapshot(&t.snapshot));
+                self.status = "Undid preset apply".into();
+            }
             self.handle.persist();
-            self.status = "Undid preset apply".into();
+        }
+    }
+
+    fn apply_queue_reorder(&mut self, ids: &[String], dest: usize, label: &str) {
+        if ids.is_empty() {
+            return;
+        }
+        let before = self.handle.lock(|s| s.queue.job_ids());
+        match self.handle.lock(|s| s.queue.reorder(ids, dest)) {
+            Ok(pos) => {
+                self.toast = Some(UndoToast {
+                    message: if ids.len() > 1 {
+                        format!("Moved {} items · {label} now #{pos}", ids.len())
+                    } else {
+                        format!("Moved {label} to #{pos}")
+                    },
+                    snapshot: Vec::new(),
+                    order: Some(before),
+                    until: Instant::now() + Duration::from_secs(8),
+                });
+                self.handle.persist();
+            }
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    pub fn move_selected_rows(&mut self, delta: isize) {
+        let ids = self.selected_ids.clone();
+        if ids.is_empty() {
+            return;
+        }
+        let dest = self.handle.lock(|s| {
+            let min = ids.iter().filter_map(|id| s.queue.index_of(id)).min().unwrap_or(0);
+            min.saturating_add_signed(delta)
+        });
+        let label = self.handle.lock(|s| {
+            s.queue.jobs.iter().find(|j| j.id == ids[0]).map(|j| j.source.display_name()).unwrap_or_else(|| "rows".into())
+        });
+        self.apply_queue_reorder(&ids, dest, &label);
+    }
+
+    fn paint_queue_drag_layer(&self, ui: &mut Ui, _jobs: &[Job]) {
+        let Some(drag) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) else {
+            return;
+        };
+        let Some(pos) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("queue-drag-ghost")));
+        let rect = Rect::from_min_size(pos + Vec2::new(12.0, 8.0), Vec2::new(320.0, 34.0));
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(0x2d, 0x8c, 0xeb, 70));
+        painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0_f32, Color32::from_rgb(0x2d, 0x8c, 0xeb)), egui::StrokeKind::Inside);
+        painter.text(rect.left_center() + Vec2::new(10.0, 0.0), egui::Align2::LEFT_CENTER, &drag.label, egui::FontId::proportional(13.0), Color32::WHITE);
+        if drag.ids.len() > 1 {
+            let badge = Rect::from_center_size(rect.right_center() - Vec2::new(36.0, 0.0), Vec2::new(56.0, 20.0));
+            painter.rect_filled(badge, CornerRadius::same(10), Color32::from_rgb(0xc4, 0x3c, 0x4a));
+            painter.text(badge.center(), egui::Align2::CENTER_CENTER, format!("{} items", drag.ids.len()), egui::FontId::proportional(11.0), Color32::WHITE);
         }
     }
 
@@ -982,6 +1143,58 @@ impl EncodeApp {
     }
 }
 
+fn group_has_locked(g: &SourceGroup, jobs: &[Job]) -> bool {
+    g.job_ids.iter().any(|id| jobs.iter().any(|j| j.id == *id && j.status.is_order_locked()))
+}
+
+fn pointer_top_half(ui: &Ui, rect: Rect) -> bool {
+    ui.input(|i| i.pointer.hover_pos()).map(|p| p.y < rect.center().y).unwrap_or(true)
+}
+
+fn rest_ids(jobs: &[Job], moving: &[String]) -> Vec<String> {
+    jobs.iter().filter(|j| !(moving.iter().any(|id| id == &j.id) && !j.status.is_order_locked())).map(|j| j.id.clone()).collect()
+}
+
+fn drop_dest_for_output(jobs: &[Job], hovered_id: &str, moving: &[String], top: bool) -> usize {
+    let rest = rest_ids(jobs, moving);
+    let idx = rest.iter().position(|id| id == hovered_id).unwrap_or(rest.len().saturating_sub(1));
+    if top { idx } else { idx.saturating_add(1) }
+}
+
+fn drop_dest_for_source(jobs: &[Job], g: &SourceGroup, moving: &[String], top: bool) -> usize {
+    let rest = rest_ids(jobs, moving);
+    let members: Vec<&String> = g.job_ids.iter().filter(|id| rest.iter().any(|r| r == *id)).collect();
+    if members.is_empty() {
+        return rest.len();
+    }
+    if top {
+        rest.iter().position(|id| id == members[0]).unwrap_or(0)
+    } else {
+        rest.iter().position(|id| id == members[members.len() - 1]).map(|i| i.saturating_add(1)).unwrap_or(rest.len())
+    }
+}
+
+fn paint_grab_or_lock(ui: &mut Ui, locked: bool, t: &Tokens) {
+    if locked {
+        ui.label(RichText::new("🔒").size(12.0).color(t.text_faint));
+    } else {
+        ui.label(RichText::new("≡").size(14.0).color(t.text_dim));
+    }
+}
+
+fn paint_insert_line(ui: &Ui, rect: Rect, top: bool, accent: Color32, dest: usize) {
+    let y = if top { rect.top() } else { rect.bottom() };
+    ui.painter().hline(rect.x_range(), y, Stroke::new(2.0_f32, accent));
+    let tip = format!("becomes #{n}", n = dest.saturating_add(1));
+    let pos = Pos2::new(rect.center().x, y);
+    ui.painter().text(pos + Vec2::new(0.0, if top { -10.0 } else { 10.0 }), egui::Align2::CENTER_CENTER, tip, egui::FontId::proportional(11.0), accent);
+}
+
+fn paint_forbidden(ui: &Ui, rect: Rect, msg: &str) {
+    ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.5_f32, Color32::from_rgb(0xc4, 0x3c, 0x4a)), egui::StrokeKind::Inside);
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("🚫  {msg}"), egui::FontId::proportional(12.0), Color32::from_rgb(0xf0, 0xc0, 0xc0));
+}
+
 struct Cols {
     src: Rect,
     fmt: Rect,
@@ -994,8 +1207,8 @@ fn col_layout(rect: Rect) -> Cols {
     let w = rect.width();
     let status_w = 64.0;
     let fmt_w = 78.0;
-    let preset_w = (w * 0.32).clamp(200.0, 340.0);
-    let out_w = (w * 0.22).clamp(120.0, 260.0);
+    let preset_w = (w * 0.28).clamp(180.0, 300.0);
+    let out_w = (w * 0.28).clamp(160.0, 360.0);
     let src_w = (w - fmt_w - preset_w - out_w - status_w).max(160.0);
     let mut x = rect.left();
     let src = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(src_w, rect.height()));
@@ -1158,27 +1371,23 @@ fn parse_try_screen(text: &str) -> (String, u32, u32) {
 enum RevealPlan {
     Select(PathBuf),
     OpenDir(PathBuf),
-    Missing,
 }
 
-/// Decide whether to select the file, open its folder, or give up.
-/// Never creates files or folders.
-fn plan_reveal(path: &Path) -> RevealPlan {
+/// Select the file if it exists; otherwise create the parent folder and open it.
+fn plan_reveal(path: &Path) -> Result<RevealPlan, String> {
     if path.exists() {
         if path.is_dir() {
-            return RevealPlan::OpenDir(path.to_path_buf());
+            return Ok(RevealPlan::OpenDir(path.to_path_buf()));
         }
-        return RevealPlan::Select(path.to_path_buf());
+        return Ok(RevealPlan::Select(path.to_path_buf()));
     }
-    match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() && dir.is_dir() => RevealPlan::OpenDir(dir.to_path_buf()),
-        _ => RevealPlan::Missing,
-    }
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| "No output folder".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create output folder ({e})"))?;
+    Ok(RevealPlan::OpenDir(dir.to_path_buf()))
 }
 
 fn spawn_reveal(plan: &RevealPlan) -> Result<(), String> {
     match plan {
-        RevealPlan::Missing => Err("Output folder doesn't exist yet".into()),
         RevealPlan::Select(p) => spawn_select_file(p),
         RevealPlan::OpenDir(p) => spawn_open_dir(p),
     }
@@ -1255,7 +1464,7 @@ mod reveal_tests {
         let Ok(()) = fs::write(&file, b"x") else {
             return;
         };
-        assert_eq!(plan_reveal(&file), RevealPlan::Select(file));
+        assert_eq!(plan_reveal(&file).ok(), Some(RevealPlan::Select(file)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1263,22 +1472,24 @@ mod reveal_tests {
     fn opens_parent_when_file_not_rendered() {
         let dir = tmp_root();
         let file = dir.join("not-rendered.mp4");
-        assert_eq!(plan_reveal(&file), RevealPlan::OpenDir(dir.clone()));
+        assert_eq!(plan_reveal(&file).ok(), Some(RevealPlan::OpenDir(dir.clone())));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn missing_when_folder_absent() {
+    fn creates_missing_folder_then_opens_it() {
         let dir = tmp_root();
         let file = dir.join("no-such-folder").join("clip.mp4");
-        assert_eq!(plan_reveal(&file), RevealPlan::Missing);
+        let nested = dir.join("no-such-folder");
+        assert_eq!(plan_reveal(&file).ok(), Some(RevealPlan::OpenDir(nested.clone())));
+        assert!(nested.is_dir());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn opens_directory_path() {
         let dir = tmp_root();
-        assert_eq!(plan_reveal(&dir), RevealPlan::OpenDir(dir.clone()));
+        assert_eq!(plan_reveal(&dir).ok(), Some(RevealPlan::OpenDir(dir.clone())));
         let _ = fs::remove_dir_all(&dir);
     }
 }

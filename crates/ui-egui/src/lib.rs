@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, seed_preset_ui_demo, DropOutcome, Handle};
-use encodecraft_job::{ScaleMode, ScreenSize, PRODUCT};
+use encodecraft_job::{ScaleMode, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
@@ -24,10 +24,8 @@ pub struct EncodeApp {
     pub(crate) preset_filter: String,
     log_filter: String,
     show_watch: bool,
-    show_batch: bool,
     pub(crate) show_preset_edit: bool,
     show_about: bool,
-    batch_sizes: Vec<bool>,
     pub(crate) edit_preset: Option<ExportPreset>,
     thumb_tex: HashMap<String, egui::TextureHandle>,
     pub(crate) status: String,
@@ -79,10 +77,8 @@ impl EncodeApp {
             preset_filter: String::new(),
             log_filter: String::new(),
             show_watch: false,
-            show_batch: false,
             show_preset_edit: false,
             show_about: false,
-            batch_sizes: Vec::new(),
             edit_preset: None,
             thumb_tex: HashMap::new(),
             status: String::new(),
@@ -122,6 +118,12 @@ impl eframe::App for EncodeApp {
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
             self.undo_toast();
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp)) {
+            self.move_selected_rows(-1);
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)) {
+            self.move_selected_rows(1);
         }
         self.ingest_drops(ctx);
         self.drop_overlay(ctx);
@@ -278,10 +280,6 @@ impl EncodeApp {
                         self.pick_sources();
                         ui.close();
                     }
-                    if ui.button("One source -> many sizes…").clicked() {
-                        self.show_batch = true;
-                        ui.close();
-                    }
                     ui.separator();
                     if ui.button("Import preset…").clicked() {
                         self.import_preset();
@@ -372,24 +370,25 @@ impl EncodeApp {
                             let _ = self.handle.lock(|s| s.queue.remove(&id));
                         }
                     }
-                    if ui.button("Up").clicked() {
-                        if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
-                            let _ = self.handle.lock(|s| s.queue.move_job(&id, -1));
-                        }
+                    if ui.button("↑").on_hover_text("Move selected rows up (Alt+↑)").clicked() {
+                        self.move_selected_rows(-1);
                     }
-                    if ui.button("Down").clicked() {
-                        if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
-                            let _ = self.handle.lock(|s| s.queue.move_job(&id, 1));
-                        }
+                    if ui.button("↓").on_hover_text("Move selected rows down (Alt+↓)").clicked() {
+                        self.move_selected_rows(1);
                     }
                     ui.separator();
-                    if ui.button("One -> many sizes").clicked() {
-                        self.show_batch = true;
-                    }
-                    ui.separator();
-                    ui.label("Parallel");
+                    ui.label("Render");
                     let mut n = self.handle.lock(|s| s.settings.max_parallel as i32);
-                    if ui.add(egui::DragValue::new(&mut n).range(1..=8)).changed() {
+                    if ui.small_button("−").clicked() {
+                        n = (n - 1).max(1);
+                    }
+                    let dv = ui.add(egui::DragValue::new(&mut n).range(1..=8).prefix("").suffix(""));
+                    let _ = dv.clone().on_hover_text("How many files encode at the same time");
+                    if ui.small_button("+").clicked() {
+                        n = (n + 1).min(8);
+                    }
+                    ui.label("at once");
+                    if n as usize != self.handle.lock(|s| s.settings.max_parallel) {
                         self.handle.lock(|s| {
                             s.settings.max_parallel = n as usize;
                             s.queue.max_parallel = n as usize;
@@ -648,15 +647,20 @@ impl EncodeApp {
     fn settings_panel(&mut self, ui: &mut Ui) {
         let mut s = self.handle.lock(|x| x.settings.clone());
         ui.label(RichText::new("Defaults").strong());
+        ui.label("Default output folder");
+        ui.radio_value(&mut s.output_beside_source, true, "Output folder next to the project");
+        ui.label(RichText::new("EffectCraft projects and dropped files write to an Output folder beside the source.").small().color(self.t().text_dim));
         ui.horizontal(|ui| {
-            ui.label("Output folder");
+            ui.radio_value(&mut s.output_beside_source, false, "Fixed folder…");
             let mut out = s.output_dir.to_string_lossy().into_owned();
-            if ui.add(egui::TextEdit::singleline(&mut out).desired_width(400.0)).changed() {
+            let edit = ui.add_enabled(!s.output_beside_source, egui::TextEdit::singleline(&mut out).desired_width(320.0));
+            if edit.changed() {
                 s.output_dir = PathBuf::from(out);
             }
-            if ui.button("Browse…").clicked() {
+            if ui.add_enabled(!s.output_beside_source, egui::Button::new("Browse…")).clicked() {
                 if let Some(d) = rfd::FileDialog::new().pick_folder() {
                     s.output_dir = d;
+                    s.output_beside_source = false;
                 }
             }
         });
@@ -745,9 +749,6 @@ impl EncodeApp {
         }
         if self.show_watch {
             self.watch_dialog(ctx);
-        }
-        if self.show_batch {
-            self.batch_dialog(ctx);
         }
         self.preset_edit_window(ctx);
         self.rules_window(ctx);
@@ -850,38 +851,6 @@ impl EncodeApp {
             self.handle.lock(|s| s.settings.watch_folders = folders);
         });
         self.show_watch = open;
-    }
-
-    fn batch_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_batch;
-        let screens = self.handle.lock(|s| s.presets.screens.clone());
-        if self.batch_sizes.len() != screens.len() {
-            self.batch_sizes = screens.iter().map(|s| matches!((s.width, s.height), (1920, 1080) | (1080, 1920) | (1200, 960) | (1080, 864))).collect();
-        }
-        let mut close = false;
-        egui::Window::new("One source -> many sizes").open(&mut open).default_width(420.0).show(ctx, |ui| {
-            ui.label("Pick sources and the DOOH sizes to emit. Each size becomes its own queue item.");
-            for (i, sz) in screens.iter().enumerate() {
-                if let Some(flag) = self.batch_sizes.get_mut(i) {
-                    ui.checkbox(flag, sz.label());
-                }
-            }
-            if ui.button("Choose files and add to queue").clicked() {
-                let files =
-                    rfd::FileDialog::new().add_filter("Media", &["mp4", "mov", "mkv", "webm", "avi", "mxf", "wav", "mp3"]).pick_files().unwrap_or_default();
-                let sizes: Vec<ScreenSize> =
-                    screens.iter().enumerate().filter(|(i, _)| self.batch_sizes.get(*i).copied().unwrap_or(false)).map(|(_, s)| s.clone()).collect();
-                if !files.is_empty() && !sizes.is_empty() {
-                    let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
-                    match self.handle.lock(|s| s.add_files_to_sizes(&files, &preset, sizes)) {
-                        Ok(ids) => self.status = format!("Queued {} job(s)", ids.len()),
-                        Err(e) => self.status = e.to_string(),
-                    }
-                    close = true;
-                }
-            }
-        });
-        self.show_batch = open && !close;
     }
 
     pub(crate) fn pick_sources(&mut self) {

@@ -54,6 +54,11 @@ impl JobStatus {
     pub fn is_queued(self) -> bool {
         matches!(self, JobStatus::Waiting | JobStatus::Paused)
     }
+
+    /// Rendering or finished — the row cannot be dragged, and nothing drops above it.
+    pub fn is_order_locked(self) -> bool {
+        matches!(self, JobStatus::Encoding | JobStatus::Done)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -306,12 +311,58 @@ impl EncodeQueue {
     }
 
     pub fn move_job(&mut self, id: &str, delta: isize) -> Result<(), QueueError> {
-        let i = self.index_of(id).ok_or_else(|| QueueError::Message(format!("no job {id}")))?;
-        let j = if delta < 0 { i.saturating_sub(delta.unsigned_abs()) } else { i.saturating_add(delta as usize).min(self.jobs.len().saturating_sub(1)) };
-        if i != j {
-            self.jobs.swap(i, j);
-        }
+        self.reorder(&[id.to_string()], self.index_of(id).unwrap_or(0).saturating_add_signed(delta))?;
         Ok(())
+    }
+
+    /// Leading jobs that have already started or finished. Drops cannot insert above this prefix.
+    pub fn locked_prefix(&self) -> usize {
+        self.jobs.iter().take_while(|j| j.status.is_order_locked()).count()
+    }
+
+    pub fn job_ids(&self) -> Vec<String> {
+        self.jobs.iter().map(|j| j.id.clone()).collect()
+    }
+
+    pub fn restore_order(&mut self, ids: &[String]) {
+        let mut map: std::collections::HashMap<String, Job> = self.jobs.drain(..).map(|j| (j.id.clone(), j)).collect();
+        let mut next = Vec::with_capacity(map.len());
+        for id in ids {
+            if let Some(j) = map.remove(id) {
+                next.push(j);
+            }
+        }
+        next.extend(map.into_values());
+        self.jobs = next;
+    }
+
+    /// Move `ids` (keeping their relative order) so the first lands at `dest` among the leftover jobs.
+    /// Locked jobs stay put. `dest` is clamped so nothing inserts above the locked prefix.
+    /// Returns the 1-based queue position of the first moved job.
+    pub fn reorder(&mut self, ids: &[String], dest: usize) -> Result<usize, QueueError> {
+        if ids.is_empty() {
+            return Ok(1);
+        }
+        let lock_n = self.locked_prefix();
+        let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut moving = Vec::new();
+        let mut rest = Vec::new();
+        for j in self.jobs.drain(..) {
+            if id_set.contains(j.id.as_str()) && !j.status.is_order_locked() {
+                moving.push(j);
+            } else {
+                rest.push(j);
+            }
+        }
+        if moving.is_empty() {
+            self.jobs = rest;
+            return Err(QueueError::Message("already rendering · can't be moved".into()));
+        }
+        let dest = dest.max(lock_n).min(rest.len());
+        let pos = dest.saturating_add(1);
+        rest.splice(dest..dest, moving);
+        self.jobs = rest;
+        Ok(pos)
     }
 
     pub fn reset_for_retry(&mut self, id: &str) -> Result<(), QueueError> {
@@ -585,6 +636,27 @@ mod tests {
         assert_eq!(q.jobs[4].status, JobStatus::Waiting);
         q.remove(&dup).unwrap();
         assert_eq!(q.jobs.len(), 4);
+    }
+
+    #[test]
+    fn reorder_skips_locked_prefix_and_restores() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        q.enqueue(&req_many(), &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        q.jobs[0].status = JobStatus::Done;
+        q.jobs[1].status = JobStatus::Encoding;
+        let before = q.job_ids();
+        let last = q.jobs[3].id.clone();
+        let pos = q.reorder(&[last.clone()], 0).unwrap();
+        assert_eq!(pos, 3);
+        assert_eq!(q.jobs[0].status, JobStatus::Done);
+        assert_eq!(q.jobs[1].status, JobStatus::Encoding);
+        assert_eq!(q.jobs[2].id, last);
+        q.restore_order(&before);
+        assert_eq!(q.job_ids(), before);
+        q.jobs[1].status = JobStatus::Encoding;
+        assert!(q.reorder(&[q.jobs[1].id.clone()], 3).is_err());
+        assert_eq!(q.jobs[1].status, JobStatus::Encoding);
     }
 
     #[test]

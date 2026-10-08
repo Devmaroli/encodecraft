@@ -60,11 +60,12 @@ pub fn run(h: Handle) {
                 continue;
             }
             let skip_out = w.output_dir.clone().unwrap_or_else(|| output_dir.clone());
+            let skip_sidecar = w.path.join("Output");
             for p in list_media(&w.path, w.recursive) {
                 if fsutil::is_symlink(&p) {
                     continue;
                 }
-                if is_under(&p, &skip_out) || is_under(&p, &output_dir) || is_under(&p, &work_dir) {
+                if is_under(&p, &skip_out) || is_under(&p, &output_dir) || is_under(&p, &skip_sidecar) || is_under(&p, &work_dir) {
                     continue;
                 }
                 if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("encodecraft-partial")) {

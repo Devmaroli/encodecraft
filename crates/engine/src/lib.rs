@@ -25,7 +25,7 @@ pub use watch::WatchFolder;
 
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use encodecraft_ffmpeg::{find_ffmpeg_at, probe, thumbnail_png, EncodeStop, Ffmpeg, FfmpegError};
 use encodecraft_job::{ControlReply, ControlRequest, EnqueueRequest, JobSource};
-use encodecraft_presets::{default_output_dir, default_template, ExportPreset, PresetLibrary};
+use encodecraft_presets::{constrain_output_dir, default_output_dir, default_template, ExportPreset, PresetLibrary};
 use encodecraft_queue::{EncodeQueue, Job, JobStatus, QueueError};
 use serde_json::{json, Value};
 
@@ -115,9 +115,17 @@ impl Handle {
         self.enqueue_with(req, false)
     }
 
-    fn enqueue_with(&self, req: EnqueueRequest, clamp_output: bool) -> Result<Vec<String>, EngineError> {
+    fn enqueue_with(&self, mut req: EnqueueRequest, clamp_output: bool) -> Result<Vec<String>, EngineError> {
         self.lock(|s| {
-            let ids = s.queue.enqueue(&req, &s.presets, &s.settings.output_dir, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
+            let configured = s.resolve_output_dir(&req.source, None);
+            let dest = if clamp_output {
+                constrain_output_dir(req.output_dir.as_deref(), &configured).map_err(EngineError::Message)?
+            } else {
+                s.resolve_output_dir(&req.source, req.output_dir.as_deref())
+            };
+            let _ = std::fs::create_dir_all(&dest);
+            req.output_dir = Some(dest.clone());
+            let ids = s.queue.enqueue(&req, &s.presets, &dest, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
             s.resolve_pending_output_names(&ids);
             let _ = s.save();
             Ok(ids)
@@ -286,6 +294,26 @@ impl Session {
         Ok(())
     }
 
+    pub fn resolve_output_dir(&self, source: &JobSource, requested: Option<&Path>) -> PathBuf {
+        if let Some(p) = requested {
+            if !p.as_os_str().is_empty() {
+                return p.to_path_buf();
+            }
+        }
+        if self.settings.output_beside_source {
+            source.sidecar_output_dir()
+        } else {
+            self.settings.output_dir.clone()
+        }
+    }
+
+    /// Resolve the destination and create it so the queue path is clickable immediately.
+    pub fn prepare_output_dir(&self, source: &JobSource, requested: Option<&Path>) -> PathBuf {
+        let dir = self.resolve_output_dir(source, requested);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
     pub fn push_log(&mut self, line: impl Into<String>) {
         self.log.push(line.into());
         if self.log.len() > 300 {
@@ -305,21 +333,23 @@ impl Session {
         Ok(ids)
     }
 
-    /// User-initiated add (picker / drag-and-drop). Output stays in Settings ▸ output folder.
+    /// User-initiated add (picker / drag-and-drop). Destination is an `Output` folder next to the
+    /// source, unless Settings uses a fixed folder.
     pub fn enqueue_user_source(&mut self, source: JobSource, preset_id: &str) -> Result<Vec<String>, EngineError> {
+        let dest = self.prepare_output_dir(&source, None);
         let req = EnqueueRequest {
             schema: 1,
             source,
             preset_id: preset_id.to_string(),
             preset_override: None,
-            output_dir: Some(self.settings.output_dir.clone()),
+            output_dir: Some(dest.clone()),
             naming: Some(self.settings.naming.clone()),
             sizes: Vec::new(),
             trim: None,
             scale: None,
             start_queue: false,
         };
-        let ids = self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?;
+        let ids = self.queue.enqueue(&req, &self.presets, &dest, &self.settings.naming, self.settings.allow_overwrite, false)?;
         self.resolve_pending_output_names(&ids);
         Ok(ids)
     }
@@ -361,19 +391,21 @@ impl Session {
     pub fn add_files_to_sizes(&mut self, paths: &[PathBuf], preset_id: &str, sizes: Vec<encodecraft_job::ScreenSize>) -> Result<Vec<String>, EngineError> {
         let mut ids = Vec::new();
         for p in paths {
+            let source = encodecraft_job::JobSource::file(p.clone());
+            let dest = self.prepare_output_dir(&source, None);
             let req = EnqueueRequest {
                 schema: 1,
-                source: encodecraft_job::JobSource::file(p.clone()),
+                source,
                 preset_id: preset_id.to_string(),
                 preset_override: None,
-                output_dir: Some(self.settings.output_dir.clone()),
+                output_dir: Some(dest.clone()),
                 naming: Some(self.settings.naming.clone()),
                 sizes: sizes.clone(),
                 trim: None,
                 scale: None,
                 start_queue: false,
             };
-            let added = self.queue.enqueue(&req, &self.presets, &self.settings.output_dir, &self.settings.naming, self.settings.allow_overwrite, false)?;
+            let added = self.queue.enqueue(&req, &self.presets, &dest, &self.settings.naming, self.settings.allow_overwrite, false)?;
             self.resolve_pending_output_names(&added);
             ids.extend(added);
         }
@@ -654,7 +686,10 @@ mod tests {
         let home = temp_home();
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
-        h.lock(|s| s.settings.output_dir = home.join("out"));
+        h.lock(|s| {
+            s.settings.output_beside_source = false;
+            s.settings.output_dir = home.join("out");
+        });
         let ids = h
             .enqueue(EnqueueRequest {
                 schema: 1,
@@ -716,19 +751,56 @@ mod tests {
         let home = temp_home();
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
-        let out = home.join("exports");
-        std::fs::create_dir_all(&out).unwrap();
-        h.lock(|s| s.settings.output_dir = out.clone());
         let project = home.join("spot.ecproj");
         std::fs::write(&project, br#"{"compositions":[{"name":"Main"}]}"#).unwrap();
         let ids = h.lock(|s| s.add_effectcraft_comps(project.clone(), &["Main".into(), "Lower".into()], "system.h264-mp4")).unwrap();
         assert_eq!(ids.len(), 2);
+        let out = home.join("Output");
         h.lock(|s| {
             assert!(matches!(&s.queue.jobs[0].source, JobSource::EffectCraft { comp: Some(c), .. } if c == "Main"));
             assert!(matches!(&s.queue.jobs[1].source, JobSource::EffectCraft { comp: Some(c), .. } if c == "Lower"));
             for j in &s.queue.jobs {
                 assert!(j.output.starts_with(&out), "{}", j.output.display());
             }
+        });
+        assert!(out.is_dir(), "Output folder is created at queue time");
+    }
+
+    #[test]
+    fn dropped_file_writes_to_output_next_to_source() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        let media = home.join("clip.mp4");
+        std::fs::write(&media, b"x").unwrap();
+        let ids = h.lock(|s| s.add_files(&[media.clone()], "system.h264-mp4")).unwrap();
+        assert_eq!(ids.len(), 1);
+        let out = home.join("Output");
+        h.lock(|s| {
+            assert!(s.queue.jobs[0].output.starts_with(&out), "{}", s.queue.jobs[0].output.display());
+        });
+        assert!(out.is_dir());
+    }
+
+    #[test]
+    fn fixed_output_folder_setting_is_honoured() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        let dest = home.join("exports");
+        std::fs::create_dir_all(&dest).unwrap();
+        h.lock(|s| {
+            s.settings.output_beside_source = false;
+            s.settings.output_dir = dest.clone();
+        });
+        let project = home.join("spot.ecproj");
+        std::fs::write(&project, br#"{"compositions":[{"name":"Main"}]}"#).unwrap();
+        let ids = h.lock(|s| s.add_effectcraft_comps(project, &["Main".into()], "system.h264-mp4")).unwrap();
+        assert_eq!(ids.len(), 1);
+        h.lock(|s| {
+            assert!(s.queue.jobs[0].output.starts_with(&dest), "{}", s.queue.jobs[0].output.display());
         });
     }
 
@@ -755,10 +827,7 @@ mod tests {
         let home = temp_home();
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
-        let out = home.join("exports");
-        std::fs::create_dir_all(&out).unwrap();
         h.lock(|s| {
-            s.settings.output_dir = out.clone();
             s.settings.naming = "{name}_{width}x{height}".into();
         });
         let project = home.join("test-2.ecproj");

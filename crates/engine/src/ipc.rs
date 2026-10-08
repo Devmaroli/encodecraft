@@ -130,6 +130,7 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
     let mut content_length = 0usize;
     let mut req_token = String::new();
     let mut sec_fetch_site = String::new();
+    let mut expect_continue = false;
     let mut n_headers = 0usize;
     loop {
         if n_headers >= MAX_HEADERS {
@@ -150,6 +151,7 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
             "origin" => origin = Some(value),
             "content-type" => content_type = value,
             "content-length" => content_length = value.parse().unwrap_or(0),
+            "expect" => expect_continue = value.to_ascii_lowercase().contains("100-continue"),
             "x-encodecraft-token" | "authorization" => {
                 req_token = value.strip_prefix("Bearer ").unwrap_or(&value).trim().to_string();
             }
@@ -161,11 +163,18 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
         let _ = write_http(&mut stream, 413, r#"{"ok":false,"error":"payload too large"}"#);
         return;
     }
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 && reader.read_exact(&mut body).is_err() {
-        let _ = write_http(&mut stream, 400, r#"{"ok":false,"error":"truncated body"}"#);
-        return;
+    if expect_continue {
+        if write_continue(reader.get_mut()).is_err() {
+            return;
+        }
     }
+    let body = match read_exact_len(&mut reader, content_length) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = write_http(&mut stream, 400, r#"{"ok":false,"error":"truncated body"}"#);
+            return;
+        }
+    };
     let parts: Vec<&str> = start.split_whitespace().collect();
     let method = parts.first().copied().unwrap_or("");
     let path = parts.get(1).copied().unwrap_or("/").split('?').next().unwrap_or("/");
@@ -257,6 +266,30 @@ fn origin_ok(origin: &str) -> bool {
         return false;
     }
     o.starts_with("http://127.0.0.1") || o.starts_with("http://localhost") || o.starts_with("http://[::1]")
+}
+
+fn write_continue(stream: &mut impl Write) -> std::io::Result<()> {
+    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+    stream.flush()
+}
+
+/// Read until `len` bytes arrive (or EOF / timeout). `read_exact` already loops; this
+/// also retries `Interrupted` so a Content-Length body from Invoke-RestMethod is not
+/// treated as truncated when it lands in several reads.
+fn read_exact_len<R: Read>(reader: &mut R, len: usize) -> std::io::Result<Vec<u8>> {
+    let mut body = vec![0u8; len];
+    let mut got = 0usize;
+    while got < len {
+        match reader.read(&mut body[got..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "truncated body"));
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(body)
 }
 
 fn write_http(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
@@ -490,5 +523,83 @@ mod tests {
         let log = h.lock(|s| s.log.join("\n"));
         assert!(log.contains("HTTP 400"), "{log}");
         assert!(log.contains("schema") || log.contains("encodecraft.job"), "{log}");
+    }
+
+    #[test]
+    fn http_control_expect_100_continue_then_content_length_body() {
+        let (_h, srv, tok, _guard) = boot();
+        let body = r#"{"id":7,"method":"queue.list"}"#;
+        let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+        let head = format!(
+            "POST /v1/control HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut r = BufReader::new(s);
+        let mut status = String::new();
+        r.read_line(&mut status).unwrap();
+        assert!(status.contains("100"), "expected 100 Continue, got {status}");
+        loop {
+            let mut h = String::new();
+            r.read_line(&mut h).unwrap();
+            if h == "\r\n" || h == "\n" || h.is_empty() {
+                break;
+            }
+        }
+        {
+            let stream = r.get_mut();
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+        let mut rest = String::new();
+        r.read_to_string(&mut rest).unwrap();
+        assert!(!rest.contains("truncated body"), "{rest}");
+        assert!(rest.contains("200") || rest.contains("\"ok\":true"), "{rest}");
+    }
+
+    #[test]
+    fn http_control_reads_content_length_across_partial_writes() {
+        let (_h, srv, tok, _guard) = boot();
+        let body = r#"{"id":8,"method":"queue.list"}"#;
+        let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+        let head = format!(
+            "POST /v1/control HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {tok}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut r = BufReader::new(s);
+        let mut status = String::new();
+        r.read_line(&mut status).unwrap();
+        assert!(status.contains("100"), "{status}");
+        loop {
+            let mut h = String::new();
+            r.read_line(&mut h).unwrap();
+            if h == "\r\n" || h == "\n" || h.is_empty() {
+                break;
+            }
+        }
+        let bytes = body.as_bytes();
+        let mid = bytes.len() / 2;
+        {
+            let stream = r.get_mut();
+            stream.write_all(&bytes[..mid]).unwrap();
+            stream.flush().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        {
+            let stream = r.get_mut();
+            stream.write_all(&bytes[mid..]).unwrap();
+            stream.flush().unwrap();
+        }
+        let mut rest = String::new();
+        r.read_to_string(&mut rest).unwrap();
+        assert!(!rest.contains("truncated body"), "{rest}");
+        assert!(rest.contains("200") || rest.contains("\"ok\":true"), "{rest}");
     }
 }

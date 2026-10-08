@@ -112,6 +112,16 @@ pub struct ScreenPresetRules {
     /// Named screens that always get Better Res (Ring Road, Al Nassar, Avenues Frame, …).
     #[serde(default = "default_listed_screens")]
     pub listed: Vec<ScreenMatchRule>,
+    /// Bumped when new built-in listed screens ship. Missing field (old `presets.json`) is 1.
+    #[serde(default = "legacy_rules_version")]
+    pub rules_version: u32,
+}
+
+/// Current built-in listed-screen pack. Old installs without this field are treated as version 1.
+pub const SCREEN_RULES_VERSION: u32 = 2;
+
+fn legacy_rules_version() -> u32 {
+    1
 }
 
 fn default_true() -> bool {
@@ -129,7 +139,7 @@ fn default_ultra_wide_aspect() -> f64 {
 fn default_ultra_wide_names() -> Vec<String> {
     vec!["The Avenues Gate".into()]
 }
-fn default_listed_screens() -> Vec<ScreenMatchRule> {
+fn listed_v1() -> Vec<ScreenMatchRule> {
     vec![
         ScreenMatchRule::new("1st Ring Road", &["1st ring", "first ring road"], 1008, 5184, true),
         ScreenMatchRule::new("Al Nassar Tower Vertical", &["al nassar", "nassar tower vertical", "nassar tower"], 960, 5328, true),
@@ -142,6 +152,11 @@ fn default_listed_screens() -> Vec<ScreenMatchRule> {
         ),
         ScreenMatchRule::new("The Avenues The Mall Entrance", &["the mall entrance"], 1920, 1080, false),
         ScreenMatchRule::new("The Avenues Grand Plaza Entrance", &["grand plaza"], 1920, 1080, false),
+    ]
+}
+
+fn listed_v2() -> Vec<ScreenMatchRule> {
+    vec![
         ScreenMatchRule::new(
             "The Avenues – Eye of Kuwait",
             &["eye of kuwait", "avenues eye of kuwait", "the avenues – eye of kuwait"],
@@ -155,6 +170,24 @@ fn default_listed_screens() -> Vec<ScreenMatchRule> {
     ]
 }
 
+fn builtin_listed_since(after_version: u32) -> Vec<ScreenMatchRule> {
+    let mut out = Vec::new();
+    if after_version < 2 {
+        out.extend(listed_v2());
+    }
+    out
+}
+
+fn default_listed_screens() -> Vec<ScreenMatchRule> {
+    let mut v = listed_v1();
+    v.extend(listed_v2());
+    v
+}
+
+fn listed_already_has(existing: &ScreenMatchRule, builtin: &ScreenMatchRule) -> bool {
+    name_matches_rule(&existing.name, builtin) || name_matches_rule(&builtin.name, existing)
+}
+
 impl Default for ScreenPresetRules {
     fn default() -> Self {
         Self {
@@ -164,6 +197,7 @@ impl Default for ScreenPresetRules {
             ultra_wide_aspect: default_ultra_wide_aspect(),
             ultra_wide_names: default_ultra_wide_names(),
             listed: default_listed_screens(),
+            rules_version: SCREEN_RULES_VERSION,
         }
     }
 }
@@ -285,6 +319,24 @@ impl ScreenPresetRules {
 
     pub fn set_ultra_wide_names_from_text(&mut self, text: &str) {
         self.ultra_wide_names = text.lines().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+    }
+
+    /// Merge built-in listed screens introduced after `rules_version`.
+    ///
+    /// Does not rewrite user-added rows or user edits. After this has run (version == current),
+    /// a later user removal of a built-in name is left alone.
+    pub fn migrate_listed_screens(&mut self) -> bool {
+        if self.rules_version >= SCREEN_RULES_VERSION {
+            return false;
+        }
+        let from = self.rules_version;
+        for rule in builtin_listed_since(from) {
+            if !self.listed.iter().any(|existing| listed_already_has(existing, &rule)) {
+                self.listed.push(rule);
+            }
+        }
+        self.rules_version = SCREEN_RULES_VERSION;
+        true
     }
 }
 
@@ -575,5 +627,43 @@ mod tests {
         assert!(!ScreenPresetRules::is_auto_token("system.h264-mp4"));
         assert!(!r.is_auto_eligible("system.hevc-mp4"));
         assert!(!r.is_auto_eligible("user.custom"));
+    }
+
+    #[test]
+    fn old_saved_rules_merge_new_listed_screens_without_clobbering() {
+        let json = r#"{
+            "enabled": true,
+            "better_res_id": "system.better-res",
+            "installation_id": "system.installation",
+            "ultra_wide_aspect": 5.0,
+            "ultra_wide_names": ["The Avenues Gate"],
+            "listed": [
+                {"name": "1st Ring Road", "aliases": ["1st ring", "first ring road"], "width": 1008, "height": 5184, "match_dims": true},
+                {"name": "Al Nassar Tower Vertical", "aliases": ["al nassar"], "width": 960, "height": 5328, "match_dims": true},
+                {"name": "The Avenues Grand Avenues Entrance", "width": 1920, "height": 1080, "match_dims": false},
+                {"name": "The Avenues The Mall Entrance", "width": 1920, "height": 1080, "match_dims": false},
+                {"name": "The Avenues Grand Plaza Entrance", "width": 1920, "height": 1080, "match_dims": false},
+                {"name": "My LED Wall", "aliases": ["led wall"], "width": 3840, "height": 800, "match_dims": true}
+            ]
+        }"#;
+        let mut r: ScreenPresetRules = serde_json::from_str(json).expect("old presets.json");
+        assert_eq!(r.rules_version, 1);
+        assert!(!r.is_listed("Eye of Kuwait", Some(7560), Some(2100)));
+        assert!(r.migrate_listed_screens());
+        assert_eq!(r.rules_version, SCREEN_RULES_VERSION);
+        assert!(r.is_listed("Eye of Kuwait", Some(7560), Some(2100)));
+        assert!(r.is_listed("Al Salam Sync", Some(3072), Some(576)));
+        assert!(r.is_listed("Piccadilly", Some(2027), Some(720)));
+        assert!(r.is_listed("Piccadilly Combined", Some(6080), Some(720)));
+        assert!(r.is_listed("1st Ring Road", Some(1008), Some(5184)));
+        assert!(r.is_listed("My LED Wall", Some(3840), Some(800)));
+        let nassar = r.listed.iter().find(|x| x.name.contains("Nassar")).expect("kept");
+        assert_eq!(nassar.aliases, vec!["al nassar".to_string()]);
+        assert!(!r.migrate_listed_screens());
+        r.listed.retain(|x| !name_matches_rule("Eye of Kuwait", x));
+        assert!(!r.is_listed("Eye of Kuwait", Some(7560), Some(2100)));
+        assert!(!r.migrate_listed_screens());
+        assert!(!r.is_listed("Eye of Kuwait", Some(7560), Some(2100)));
+        assert!(r.is_listed("Piccadilly", Some(2027), Some(720)));
     }
 }

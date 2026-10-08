@@ -671,6 +671,9 @@ impl PresetLibrary {
                 if lib.screen_rules.listed.is_empty() && lib.screen_rules.ultra_wide_names.is_empty() {
                     lib.screen_rules = ScreenPresetRules::default();
                 }
+                if lib.screen_rules.migrate_listed_screens() {
+                    let _ = lib.save(path);
+                }
                 Ok(lib)
             }
             Err(_) => {
@@ -896,6 +899,41 @@ mod tests {
         ] {
             assert!(ids.iter().any(|id| id == need), "missing {need}");
         }
+    }
+
+    #[test]
+    fn load_migrates_old_presets_json_listed_screens() {
+        let dir = std::env::temp_dir().join(format!("encodecraft-rules-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("presets.json");
+        let old = serde_json::json!({
+            "user": [],
+            "screens": [],
+            "screen_rules": {
+                "enabled": true,
+                "better_res_id": "system.better-res",
+                "installation_id": "system.installation",
+                "ultra_wide_aspect": 5.0,
+                "ultra_wide_names": ["The Avenues Gate"],
+                "listed": [
+                    {"name": "1st Ring Road", "width": 1008, "height": 5184, "match_dims": true},
+                    {"name": "Al Nassar Tower Vertical", "width": 960, "height": 5328, "match_dims": true},
+                    {"name": "The Avenues Grand Avenues Entrance", "width": 1920, "height": 1080, "match_dims": false},
+                    {"name": "The Avenues The Mall Entrance", "width": 1920, "height": 1080, "match_dims": false},
+                    {"name": "The Avenues Grand Plaza Entrance", "width": 1920, "height": 1080, "match_dims": false}
+                ]
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let lib = PresetLibrary::load(&path).unwrap();
+        assert!(lib.screen_rules.is_listed("Eye of Kuwait", Some(7560), Some(2100)));
+        assert!(lib.screen_rules.is_listed("Al Salam Sync", Some(3072), Some(576)));
+        assert!(lib.screen_rules.is_listed("Piccadilly", Some(2027), Some(720)));
+        assert_eq!(lib.screen_rules.rules_version, crate::screen_rules::SCREEN_RULES_VERSION);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("Eye of Kuwait") || saved.contains("eye of kuwait"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

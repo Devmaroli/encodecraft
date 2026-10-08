@@ -12,6 +12,10 @@ use crate::EngineError;
 pub struct Settings {
     #[serde(default = "default_parallel")]
     pub max_parallel: usize,
+    /// When true (default), jobs write to an `Output` folder next to the `.ecproj` or dropped file.
+    #[serde(default = "default_true")]
+    pub output_beside_source: bool,
+    /// Used when [`Self::output_beside_source`] is false.
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
     #[serde(default = "default_naming")]
@@ -39,6 +43,9 @@ pub struct Settings {
     pub recent_preset_ids: Vec<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
 fn default_parallel() -> usize {
     2
 }
@@ -59,6 +66,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             max_parallel: 2,
+            output_beside_source: true,
             output_dir: default_output_dir(),
             naming: default_naming(),
             default_preset_id: default_preset(),

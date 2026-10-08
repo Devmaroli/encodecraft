@@ -22,7 +22,10 @@ mod run;
 pub use command::{
     argv_path, build_encode_plan, build_encode_plans, even, h264_level_for_frame, h264_unencodable_message, sequence_pattern, EncodePlan, PlanInput,
 };
-pub use detect::{find_effectcraft_cli, find_effectcraft_cli_with, find_ffmpeg, find_ffmpeg_at, sidecar_ffmpeg, EffectcraftLookup, Ffmpeg};
+pub use detect::{
+    find_effectcraft_cli, find_effectcraft_cli_with, find_ffmpeg, find_ffmpeg_at, gpu_unavailable_reason, nvidia_from_env, nvidia_gpu_present, sidecar_ffmpeg,
+    use_gpu_encoder, EffectcraftLookup, Ffmpeg,
+};
 pub use preview::{frame_at_25, grab_preview_jpeg, letterbox_fit, preview_pixel_size, timecode_25, PREVIEW_MAX_LONG};
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use proc::{command as hidden_command, hide_window, CREATE_NO_WINDOW};

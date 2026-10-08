@@ -57,7 +57,8 @@ pub struct EncodeApp {
     pub(crate) shift_anchor: Option<String>,
     pub(crate) marquee: Option<ux::MarqueeState>,
     pub(crate) remove_prompt: Option<ux::RemovePrompt>,
-    nvenc_available: bool,
+    gpu_ready: bool,
+    gpu_block_reason: Option<&'static str>,
     last_seen_jobs: usize,
     jobs_bootstrapped: bool,
     pub(crate) try_screen: String,
@@ -139,7 +140,8 @@ impl EncodeApp {
             shift_anchor: selected,
             marquee: None,
             remove_prompt: None,
-            nvenc_available: false,
+            gpu_ready: false,
+            gpu_block_reason: Some("No NVIDIA GPU detected."),
             last_seen_jobs: 0,
             jobs_bootstrapped: false,
             try_screen: String::new(),
@@ -199,7 +201,11 @@ impl EncodeApp {
         if rev == self.snap_rev && !self.jobs_cache.is_empty() {
             return;
         }
-        let (jobs, running, ff, nvenc) = self.handle.lock(|s| {
+        let (jobs, running, ff, gpu_ready, gpu_reason) = self.handle.lock(|s| {
+            let (ready, reason) = match &s.ffmpeg {
+                Ok(f) => (f.gpu_encode_ready(), encodecraft_ffmpeg::gpu_unavailable_reason(f.nvenc, f.nvidia)),
+                Err(_) => (false, Some("FFmpeg was not found.")),
+            };
             (
                 s.queue.jobs.iter().map(Job::for_ui).collect::<Vec<_>>(),
                 s.queue.running,
@@ -207,7 +213,8 @@ impl EncodeApp {
                     Ok(f) => (true, f.ok_message()),
                     Err(e) => (false, e.to_string()),
                 },
-                s.ffmpeg.as_ref().ok().is_some_and(|f| f.nvenc),
+                ready,
+                reason,
             )
         });
         let n = jobs.len();
@@ -221,7 +228,8 @@ impl EncodeApp {
         self.queue_running = running;
         self.ffmpeg_ok = ff.0;
         self.ffmpeg_msg = ff.1;
-        self.nvenc_available = nvenc;
+        self.gpu_ready = gpu_ready;
+        self.gpu_block_reason = gpu_reason;
         self.snap_rev = rev;
     }
 
@@ -424,22 +432,14 @@ impl EncodeApp {
         if hovered.is_empty() {
             return;
         }
-        let has_ecproj = hovered.iter().any(|f| f.path.as_ref().is_some_and(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ecproj"))));
+        let has_ecproj =
+            hovered.iter().any(|f| f.path.as_ref().is_some_and(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ecproj"))));
         let screen = ctx.screen_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-overlay")));
         let fill = Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 42);
         painter.rect_filled(screen, CornerRadius::ZERO, fill);
-        painter.rect_stroke(
-            screen.shrink(10.0),
-            CornerRadius::same(10),
-            Stroke::new(3.0_f32, self.t().accent),
-            StrokeKind::Inside,
-        );
-        let label = if has_ecproj {
-            "Drop EffectCraft project to pick compositions"
-        } else {
-            "Drop media to add to the queue"
-        };
+        painter.rect_stroke(screen.shrink(10.0), CornerRadius::same(10), Stroke::new(3.0_f32, self.t().accent), StrokeKind::Inside);
+        let label = if has_ecproj { "Drop EffectCraft project to pick compositions" } else { "Drop media to add to the queue" };
         let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(22.0), Color32::WHITE);
         let pos = screen.center() - galley.size() * 0.5;
         painter.galley(pos, galley, Color32::WHITE);
@@ -551,22 +551,7 @@ impl EncodeApp {
                     if ui.button("  Stop  ").clicked() {
                         self.handle.stop_all();
                     }
-                    ui.separator();
-                    {
-                        let nvenc = self.nvenc_available;
-                        let mut gpu = self.handle.lock(|s| s.settings.gpu_encode);
-                        let label = if nvenc { "GPU encode" } else { "GPU encode (no NVIDIA)" };
-                        let r = ui.add_enabled(nvenc, egui::Checkbox::new(&mut gpu, label));
-                        if nvenc {
-                            r.on_hover_text("When on, H.264 presets that allow GPU use NVIDIA NVENC. Off forces CPU x264.");
-                        } else {
-                            r.on_hover_text("No NVIDIA NVENC encoder in this FFmpeg build.");
-                        }
-                        if nvenc && gpu != self.handle.lock(|s| s.settings.gpu_encode) {
-                            self.handle.lock(|s| s.settings.gpu_encode = gpu);
-                            self.handle.mark_dirty();
-                        }
-                    }
+                    self.gpu_encode_toolbar(ui, &t);
                     ui.separator();
                     if ui.button("  + Add  ").clicked() {
                         self.pick_sources();
@@ -617,13 +602,38 @@ impl EncodeApp {
         );
     }
 
+    /// Small On/Off control. Hidden when this PC has no NVIDIA GPU (or FFmpeg has no NVENC).
+    fn gpu_encode_toolbar(&mut self, ui: &mut Ui, t: &crate::theme::Tokens) {
+        if !self.gpu_ready {
+            return;
+        }
+        ui.separator();
+        let mut gpu = self.handle.lock(|s| s.settings.gpu_encode);
+        let label = if gpu { " GPU encode · On " } else { " GPU encode · Off " };
+        let mut btn = egui::Button::new(label);
+        if gpu {
+            btn = btn.fill(t.cache_green);
+        }
+        let r = ui.add(btn).on_hover_text(
+            "When on, H.264 presets that allow GPU use NVIDIA NVENC (same bitrates). Off forces CPU x264 for every job. Quality differs slightly from x264.",
+        );
+        if r.clicked() {
+            gpu = !gpu;
+            self.handle.lock(|s| s.settings.gpu_encode = gpu);
+            self.handle.mark_dirty();
+        }
+    }
+
     fn workspace_bar(&mut self, ctx: &egui::Context) {
         let t = self.t();
-        egui::TopBottomPanel::top("workspace-bar").exact_height(30.0).frame(egui::Frame::NONE.fill(t.header_bg).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                self.workspace_switcher(ui);
+        egui::TopBottomPanel::top("workspace-bar")
+            .exact_height(30.0)
+            .frame(egui::Frame::NONE.fill(t.header_bg).inner_margin(egui::Margin::symmetric(8, 4)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    self.workspace_switcher(ui);
+                });
             });
-        });
     }
 
     pub(crate) fn encode_panel(&mut self, ui: &mut Ui) {
@@ -632,14 +642,7 @@ impl EncodeApp {
             ui.label(RichText::new("Select a queue item to edit export settings.").color(t.text_dim));
             return;
         };
-        let original = (
-            job.preset.clone(),
-            job.scale,
-            job.trim,
-            job.preset_overridden,
-            job.preset_reason,
-            job.encode_warning.clone(),
-        );
+        let original = (job.preset.clone(), job.scale, job.trim, job.preset_overridden, job.preset_reason, job.encode_warning.clone());
         ui.horizontal(|ui| {
             ui.label("Preset");
             let presets = self.handle.lock(|s| s.presets.all());
@@ -811,11 +814,8 @@ impl EncodeApp {
             ui.end_row();
         });
         let id = job.id.clone();
-        job.encode_warning = encodecraft_ffmpeg::h264_unencodable_message(
-            &job.preset,
-            job.preset.video.width.unwrap_or(0),
-            job.preset.video.height.unwrap_or(0),
-        );
+        job.encode_warning =
+            encodecraft_ffmpeg::h264_unencodable_message(&job.preset, job.preset.video.width.unwrap_or(0), job.preset.video.height.unwrap_or(0));
         let changed = job.preset != original.0
             || job.scale != original.1
             || job.trim != original.2
@@ -962,15 +962,23 @@ impl EncodeApp {
         }
         ui.label(RichText::new("Off (default): jobs land as Ready until you press Start queue.").small().color(self.t().text_dim));
         {
-            let nvenc = self.nvenc_available;
-            let r = ui.add_enabled(nvenc, egui::Checkbox::new(&mut s.gpu_encode, "GPU encode (NVIDIA NVENC)"));
-            if nvenc {
-                r.on_hover_text("Master switch. Presets that allow GPU use NVENC when this is on.");
+            let ready = self.gpu_ready;
+            let tip = if ready {
+                "Same as the toolbar switch. Off: every job uses CPU x264. On: presets that allow GPU use NVENC."
             } else {
-                r.on_hover_text("No NVIDIA NVENC encoder in this FFmpeg build.");
-                s.gpu_encode = false;
+                self.gpu_block_reason.unwrap_or("No NVIDIA GPU detected.")
+            };
+            let r = ui.add_enabled(ready, egui::Checkbox::new(&mut s.gpu_encode, "GPU encode (NVIDIA NVENC)")).on_hover_text(tip);
+            if ready && r.changed() {
+                self.handle.lock(|sess| sess.settings.gpu_encode = s.gpu_encode);
+                self.handle.mark_dirty();
             }
         }
+        ui.label(
+            RichText::new("Off (default). Studio H.264 presets allow GPU; the toolbar switch is hidden without an NVIDIA GPU.")
+                .small()
+                .color(self.t().text_dim),
+        );
         ui.add_space(8.0);
         ui.label(RichText::new("Encoding preview").strong());
         let mut preview = s.show_encode_preview;
@@ -987,9 +995,11 @@ impl EncodeApp {
         ui.add_space(8.0);
         ui.label(RichText::new("Studio screen assignment").strong());
         ui.label(
-            RichText::new("Sized jobs pick Better Res (ultra wide / listed screens) or Installation. Open the rules editor to change the lists — no typing JSON.")
-                .small()
-                .color(self.t().text_dim),
+            RichText::new(
+                "Sized jobs pick Better Res (ultra wide / listed screens) or Installation. Open the rules editor to change the lists — no typing JSON.",
+            )
+            .small()
+            .color(self.t().text_dim),
         );
         if ui.button("Auto-assign rules…").clicked() {
             self.show_rules = true;
@@ -997,9 +1007,11 @@ impl EncodeApp {
         ui.add_space(8.0);
         ui.label(RichText::new("One-off presets").strong());
         ui.label(
-            RichText::new("These are never remembered as a manual choice. The next send of that comp goes back to Auto (Better Res / Installation) or the default.")
-                .small()
-                .color(self.t().text_dim),
+            RichText::new(
+                "These are never remembered as a manual choice. The next send of that comp goes back to Auto (Better Res / Installation) or the default.",
+            )
+            .small()
+            .color(self.t().text_dim),
         );
         let one_offs = self.handle.lock(|x| x.presets.one_off_presets());
         if one_offs.is_empty() {
@@ -1056,7 +1068,10 @@ impl EncodeApp {
         let mut queue = false;
         let mut cancel = false;
         let mut queued_ok = false;
-        let title = format!("Queue EffectCraft project — {}", picker.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| picker.path.display().to_string()));
+        let title = format!(
+            "Queue EffectCraft project — {}",
+            picker.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| picker.path.display().to_string())
+        );
         egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(420.0).show(ctx, |ui| {
             ui.label("Choose which composition(s) to send to the encode queue. EncodeCraft will render each with effectcraft-cli, then encode with the default preset.");
             if let Some(note) = &picker.parse_note {
@@ -1094,7 +1109,11 @@ impl EncodeApp {
             let preset = self.handle.lock(|s| s.settings.default_preset_id.clone());
             let comps: Vec<String> = if picker.comps.is_empty() {
                 let t = picker.custom.trim();
-                if t.is_empty() { Vec::new() } else { vec![t.to_string()] }
+                if t.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![t.to_string()]
+                }
             } else {
                 picker.comps.iter().enumerate().filter(|(i, _)| picker.selected.get(*i).copied().unwrap_or(false)).map(|(_, n)| n.clone()).collect()
             };
@@ -1216,11 +1235,8 @@ fn window_icon() -> Option<egui::IconData> {
 
 /// Native window options shared by the desktop app.
 pub fn native_options() -> eframe::NativeOptions {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1440.0, 900.0])
-        .with_min_inner_size([960.0, 620.0])
-        .with_title(PRODUCT)
-        .with_drag_and_drop(true);
+    let mut viewport =
+        egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([960.0, 620.0]).with_title(PRODUCT).with_drag_and_drop(true);
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }

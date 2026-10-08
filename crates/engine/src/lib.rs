@@ -1081,6 +1081,22 @@ mod tests {
     }
 
     #[test]
+    fn gpu_encode_defaults_off_and_roundtrips() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        assert!(!h.lock(|s| s.settings.gpu_encode), "GPU encode must start off");
+        h.lock(|s| s.settings.gpu_encode = true);
+        h.persist();
+        drop(h);
+        let h = Handle::open_core().unwrap();
+        assert!(h.lock(|s| s.settings.gpu_encode), "toolbar GPU encode is remembered");
+        assert!(!encodecraft_ffmpeg::use_gpu_encoder(false, true, true, true, true));
+        assert!(encodecraft_ffmpeg::use_gpu_encoder(true, true, true, true, true));
+    }
+
+    #[test]
     fn migrates_legacy_naming_template_on_load() {
         let _guard = paths::lock_home();
         let home = temp_home();

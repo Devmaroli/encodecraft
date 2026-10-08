@@ -100,9 +100,8 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let override_path = h.lock(|s| s.settings.ffmpeg_path.clone());
     let ff = find_ffmpeg_at(override_path.as_deref())?;
 
-    let nvenc_ok = ff.nvenc;
     let gpu_on = h.lock(|s| s.settings.gpu_encode);
-    let use_nvenc = gpu_on && nvenc_ok && job.preset.video.allow_gpu && job.preset.format == OutputFormat::H264Mp4;
+    let use_nvenc = encodecraft_ffmpeg::use_gpu_encoder(gpu_on, ff.nvenc, ff.nvidia, job.preset.video.allow_gpu, job.preset.format == OutputFormat::H264Mp4);
     let mut preset = job.preset.clone();
     preset.video.use_nvenc = use_nvenc;
     let encoder_label = if use_nvenc { "GPU" } else { "CPU" };

@@ -339,6 +339,7 @@ fn dock_style(ui: &Ui, t: &Tokens) -> Style {
     style.tab_bar.bg_fill = t.header_bg;
     style.tab_bar.height = 26.0;
     style.tab_bar.hline_color = t.field_border;
+    style.tab.minimum_width = Some(96.0);
     style.separator.color_idle = t.field_border;
     style.separator.color_hovered = t.link;
     style.separator.color_dragged = t.accent;
@@ -387,7 +388,8 @@ impl TabViewer for AppTabs<'_> {
     type Tab = PanelKind;
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        format!("☰  {}", tab.title()).into()
+        // egui's default font lacks U+2630 (☰); U+2261 (≡) is the tab ☰ stand-in.
+        RichText::new(format!("≡  {}", tab.title())).size(13.0).into()
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {

@@ -10,6 +10,7 @@ use egui::{Color32, FontId, Stroke, TextStyle, Visuals};
 pub enum ThemeKind {
     #[default]
     Dark,
+    #[allow(dead_code)]
     Darker,
     Light,
 }

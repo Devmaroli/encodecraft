@@ -320,6 +320,7 @@ impl EncodeQueue {
                     j.error = None;
                     j.finished_ms = None;
                     j.started_ms = None;
+                    j.encoder_used = None;
                 }
             }
         }
@@ -363,6 +364,8 @@ impl EncodeQueue {
         copy.started_ms = None;
         copy.finished_ms = None;
         copy.created_ms = unix_ms();
+        copy.encoder_used = None;
+        copy.measured_bitrate_kbps = None;
         let ctx = NamingContext::from_source(
             &copy.source,
             &copy.preset,
@@ -746,6 +749,19 @@ mod tests {
         assert_eq!(q.jobs[4].status, JobStatus::Waiting);
         q.remove(&dup).unwrap();
         assert_eq!(q.jobs.len(), 4);
+    }
+
+    #[test]
+    fn reset_status_clears_encoder_used() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        q.enqueue(&req_many(), &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        q.jobs[0].status = JobStatus::Done;
+        q.jobs[0].encoder_used = Some("GPU".into());
+        let id = q.jobs[0].id.clone();
+        q.reset_status(&[id]);
+        assert_eq!(q.jobs[0].status, JobStatus::Waiting);
+        assert_eq!(q.jobs[0].encoder_used, None);
     }
 
     #[test]

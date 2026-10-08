@@ -749,7 +749,7 @@ mod tests {
     fn hrd_cbr_is_injected_before_output_path() {
         let mut args = vec!["-c:v".into(), "libx264".into(), "-b:v".into(), "2000k".into(), "/out/ad.mp4".into()];
         inject_hrd_cbr(&mut args);
-        assert_eq!(args.last().as_deref(), Some("/out/ad.mp4"));
+        assert_eq!(args.last().map(String::as_str), Some("/out/ad.mp4"));
         let i = args.iter().position(|a| a == "-x264-params").expect("x264-params");
         assert_eq!(args[i + 1], "nal-hrd=cbr");
         assert!(i < args.len() - 1);

@@ -144,8 +144,7 @@ fn enforce_min_bitrate(
         return Ok((measured, false, extra));
     };
     let min_f = min_k as f32;
-    // Short clips + mux overhead typically land ~10% under the HRD target.
-    if measured.unwrap_or(0.0) >= min_f * 0.90 {
+    if measured.unwrap_or(0.0) + 20.0 >= min_f {
         return Ok((measured, false, extra));
     }
     let msg = format!(
@@ -190,13 +189,13 @@ fn enforce_min_bitrate(
             let _ = remove_partial(&tmp);
             extra.push_str(&format!("filler pass failed ({e}); keeping VBR encode\n"));
             on_log("filler pass failed; keeping VBR encode");
-            let warn = measured.map(|a| a < min_f * 0.90).unwrap_or(true);
+            let warn = measured.map(|a| a + 20.0 < min_f).unwrap_or(true);
             return Ok((measured, warn, extra));
         }
     }
     let info2 = probe::probe(ff, final_out).ok();
     measured = info2.as_ref().and_then(MediaInfo::video_average_kbps).or(measured);
-    let warn = measured.map(|a| a < min_f * 0.90).unwrap_or(false);
+    let warn = measured.map(|a| a + 20.0 < min_f).unwrap_or(false);
     Ok((measured, warn, extra))
 }
 
@@ -597,7 +596,7 @@ mod tests {
                 let has_audio = info.audio.is_some();
                 let want_audio = id == "system.approval-res";
                 let audio_ok = has_audio == want_audio;
-                let min_ok = mbps + 0.05 >= min as f32 * 0.90;
+                let min_ok = mbps + 0.08 >= min as f32;
                 let max_ok = mbps <= max as f32 * 1.25 + 0.05;
                 let pass = min_ok && max_ok && audio_ok;
                 rows.push((id, clip, mbps, min, max, has_audio, pass));

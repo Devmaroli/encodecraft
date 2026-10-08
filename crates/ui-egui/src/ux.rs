@@ -337,7 +337,7 @@ impl EncodeApp {
             if let Some(kbps) = job.measured_bitrate_kbps {
                 let mbps = kbps / 1000.0;
                 let min_k = job.preset.video.quality.effective_min_kbps().map(|k| k as f32);
-                let below = min_k.is_some_and(|m| kbps < m * 0.90);
+                let below = min_k.is_some_and(|m| kbps + 20.0 < m);
                 let col = if below { t.warning } else { t.text_dim };
                 let label = if below {
                     format!("{mbps:.1} Mbps · under min")

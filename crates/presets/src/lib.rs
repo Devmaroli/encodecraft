@@ -185,9 +185,25 @@ pub enum Quality {
     Bitrate { kbps: u32 },
     /// Encoder-specific quality 1–100 (used for JPEG / ProRes-ish).
     Quality { value: u8 },
-    /// libx264 VBR 2-pass. Numbers are Mbps so they stay easy to edit.
-    #[serde(rename = "vbr-2pass", alias = "vbr2pass", alias = "twopass", alias = "vbr-2-pass")]
-    Vbr2Pass { target_mbps: f64, max_mbps: f64 },
+    /// libx264 VBR. Numbers are Mbps so they stay easy to edit.
+    /// `two_pass` defaults to true so older `vbr-2pass` JSON stays 2-pass.
+    #[serde(rename = "vbr-2pass", alias = "vbr2pass", alias = "twopass", alias = "vbr-2-pass", alias = "vbr-1pass")]
+    Vbr2Pass {
+        target_mbps: f64,
+        max_mbps: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_mbps: Option<f64>,
+        /// false = VBR 1-pass (Adobe Media Encoder's H.264 default when encoding mode is omitted).
+        #[serde(default = "bool_true", skip_serializing_if = "is_true")]
+        two_pass: bool,
+    },
+}
+
+fn bool_true() -> bool {
+    true
+}
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 impl Quality {
@@ -198,7 +214,50 @@ impl Quality {
         Quality::Bitrate { kbps }
     }
     pub fn vbr_2pass(target_mbps: f64, max_mbps: f64) -> Self {
-        Quality::Vbr2Pass { target_mbps, max_mbps }
+        Self::vbr(None, target_mbps, max_mbps, true)
+    }
+
+    pub fn vbr(min_mbps: Option<f64>, target_mbps: f64, max_mbps: f64, two_pass: bool) -> Self {
+        Quality::Vbr2Pass { target_mbps, max_mbps, min_mbps, two_pass }
+    }
+
+    pub fn is_two_pass(self) -> bool {
+        matches!(self, Quality::Vbr2Pass { two_pass: true, .. })
+    }
+
+    pub fn vbr_parts(self) -> Option<(Option<f64>, f64, f64, bool)> {
+        match self {
+            Quality::Vbr2Pass { min_mbps, target_mbps, max_mbps, two_pass } => Some((min_mbps, target_mbps, max_mbps, two_pass)),
+            _ => None,
+        }
+    }
+
+    /// AME leftover: min may be stored above the target; clamp so min ≤ target.
+    pub fn effective_min_mbps(self) -> Option<f64> {
+        let (min, target, _, _) = self.vbr_parts()?;
+        Some(min.unwrap_or(0.0).min(target).max(0.0)).filter(|v| *v > 0.005)
+    }
+
+    pub fn effective_min_kbps(self) -> Option<u32> {
+        self.effective_min_mbps().map(mbps_to_kbps)
+    }
+
+    pub fn bitrate_order_warning(self) -> Option<String> {
+        let (min, target, max, _) = self.vbr_parts()?;
+        if target > max + 0.01 {
+            return Some(format!("Target {} Mbps is above the {} Mbps maximum.", compact_mbps(target), compact_mbps(max)));
+        }
+        if let Some(min) = min {
+            if min > target + 0.01 {
+                return Some(format!(
+                    "Minimum {} Mbps is above the {} Mbps target — using {} Mbps (AME clamps this too).",
+                    compact_mbps(min),
+                    compact_mbps(target),
+                    compact_mbps(target)
+                ));
+            }
+        }
+        None
     }
 
     pub fn target_kbps(self) -> Option<u32> {
@@ -211,7 +270,7 @@ impl Quality {
 
     pub fn max_kbps(self) -> Option<u32> {
         match self {
-            Quality::Vbr2Pass { max_mbps, target_mbps } => {
+            Quality::Vbr2Pass { max_mbps, target_mbps, .. } => {
                 let t = mbps_to_kbps(target_mbps);
                 Some(mbps_to_kbps(max_mbps).max(t))
             }
@@ -251,6 +310,9 @@ pub struct VideoSettings {
     /// libx264 `-level:v`. `auto` / omitted = pick from frame size (6.2 when any side > 4096).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub h264_level: Option<String>,
+    /// GOP / keyframe distance in frames (`-g`). Studio AME presets use 72.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframe_interval: Option<u32>,
 }
 
 fn default_quality() -> Quality {
@@ -268,6 +330,7 @@ impl Default for VideoSettings {
             prores_profile: None,
             h264_profile: None,
             h264_level: None,
+            keyframe_interval: None,
         }
     }
 }
@@ -332,7 +395,13 @@ impl ExportPreset {
 
     pub fn bitrate_short(&self) -> String {
         match self.video.quality {
-            Quality::Vbr2Pass { target_mbps, max_mbps } => format!("{}–{} Mbps", compact_mbps(target_mbps), compact_mbps(max_mbps)),
+            Quality::Vbr2Pass { target_mbps, max_mbps, .. } => {
+                if (max_mbps - target_mbps).abs() < 0.05 {
+                    format!("{} Mbps", compact_mbps(target_mbps))
+                } else {
+                    format!("{}–{} Mbps", compact_mbps(target_mbps), compact_mbps(max_mbps))
+                }
+            }
             Quality::Bitrate { kbps } if kbps >= 1000 => format!("{:.0} Mbps", kbps as f64 / 1000.0),
             Quality::Bitrate { kbps } => format!("{kbps} kbps"),
             Quality::Crf { value } => format!("CRF {value}"),
@@ -728,8 +797,8 @@ fn slugify(s: &str) -> String {
 pub fn builtin_presets() -> Vec<ExportPreset> {
     vec![
         preset("system.h264-mp4", "H.264 Match Source", OutputFormat::H264Mp4, Quality::crf(23), true),
-        studio_h264(BETTER_RES_ID, "Better Res", 7.0, 8.0, false),
-        studio_h264(INSTALLATION_ID, "Installation", 5.0, 6.0, false),
+        studio_h264(BETTER_RES_ID, "Better Res", 2.0, 6.2, 6.2, true, false, false),
+        studio_h264(INSTALLATION_ID, "Installation", 2.0, 4.0, 6.0, true, false, false),
         approval_res(),
         sultan(),
         preset("system.hevc-mp4", "HEVC Match Source", OutputFormat::HevcMp4, Quality::crf(28), true),
@@ -785,7 +854,16 @@ fn preset(id: &str, name: &str, format: OutputFormat, quality: Quality, audio: b
     }
 }
 
-fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64, one_off: bool) -> ExportPreset {
+fn studio_h264(
+    id: &str,
+    name: &str,
+    min_mbps: f64,
+    target_mbps: f64,
+    max_mbps: f64,
+    two_pass: bool,
+    audio: bool,
+    one_off: bool,
+) -> ExportPreset {
     ExportPreset {
         id: id.into(),
         name: name.into(),
@@ -793,27 +871,30 @@ fn studio_h264(id: &str, name: &str, target_mbps: f64, max_mbps: f64, one_off: b
         format: OutputFormat::H264Mp4,
         video: VideoSettings {
             frame_rate: FrameRate::Custom(25.0),
-            quality: Quality::vbr_2pass(target_mbps, max_mbps),
+            quality: Quality::vbr(Some(min_mbps), target_mbps, max_mbps, two_pass),
             h264_profile: Some("high".into()),
             h264_level: Some("auto".into()),
+            keyframe_interval: Some(72),
             ..VideoSettings::default()
         },
-        audio: AudioSettings { enabled: true, ..AudioSettings::default() },
+        audio: AudioSettings { enabled: audio, ..AudioSettings::default() },
         one_off,
         group: "Studio".into(),
     }
 }
 
 fn approval_res() -> ExportPreset {
-    let mut p = studio_h264(APPROVAL_RES_ID, "Approval Res", 1.0, 1.2, true);
-    p.audio.bitrate_kbps = 128;
+    // AME stores min 2 Mbps above the 1 Mbps target; we keep that number and clamp at encode/UI.
+    let mut p = studio_h264(APPROVAL_RES_ID, "Approval Res", 2.0, 1.0, 6.0, true, true, true);
+    p.audio.bitrate_kbps = 320;
+    p.audio.sample_rate = Some(48_000);
+    p.audio.channels = Some(2);
     p
 }
 
 fn sultan() -> ExportPreset {
-    let mut p = studio_h264(SULTAN_ID, "Sultan", 2.0, 3.0, true);
-    p.audio.enabled = false;
-    p
+    // ADBEVideoBitrateEncoding has no ParamValue in the .epr — AME H.264 default is VBR 1-pass.
+    studio_h264(SULTAN_ID, "Sultan", 2.0, 3.0, 3.0, false, false, true)
 }
 
 /// Built-in digital-out-of-home (and common web/social) screen sizes.
@@ -992,10 +1073,13 @@ mod tests {
         assert_eq!(br.name, "Better Res");
         assert_eq!(br.video.frame_rate, FrameRate::Custom(25.0));
         assert_eq!(br.video.h264_profile.as_deref(), Some("high"));
-        assert_eq!(br.video.quality, Quality::vbr_2pass(7.0, 8.0));
+        assert_eq!(br.video.keyframe_interval, Some(72));
+        assert_eq!(br.video.quality, Quality::vbr(Some(2.0), 6.2, 6.2, true));
+        assert!(!br.audio.enabled);
         let inst = lib.get(INSTALLATION_ID).unwrap();
         assert_eq!(inst.name, "Installation");
-        assert_eq!(inst.video.quality, Quality::vbr_2pass(5.0, 6.0));
+        assert_eq!(inst.video.quality, Quality::vbr(Some(2.0), 4.0, 6.0, true));
+        assert!(!inst.audio.enabled);
     }
 
     #[test]
@@ -1024,22 +1108,27 @@ mod tests {
         let p = lib.get(APPROVAL_RES_ID).unwrap();
         assert!(p.one_off);
         assert_eq!(p.video.frame_rate, FrameRate::Custom(25.0));
-        assert_eq!(p.video.quality, Quality::vbr_2pass(1.0, 1.2));
+        assert_eq!(p.video.quality, Quality::vbr(Some(2.0), 1.0, 6.0, true));
+        assert_eq!(p.video.quality.effective_min_mbps(), Some(1.0));
+        assert!(p.video.quality.bitrate_order_warning().unwrap().contains("AME clamps"));
         assert!(p.audio.enabled);
-        assert_eq!(p.audio.bitrate_kbps, 128);
+        assert_eq!(p.audio.bitrate_kbps, 320);
+        assert_eq!(p.audio.sample_rate, Some(48_000));
+        assert_eq!(p.audio.channels, Some(2));
         assert!(p.video.width.is_none());
         assert!(p.video.height.is_none());
         assert!(lib.one_off_presets().iter().any(|x| x.id == APPROVAL_RES_ID));
     }
 
     #[test]
-    fn sultan_studio_is_one_off_2_3_mbps_without_audio() {
+    fn sultan_studio_is_one_off_vbr_1pass_without_audio() {
         let lib = PresetLibrary::new();
         let p = lib.get(SULTAN_ID).unwrap();
         assert_eq!(p.name, "Sultan");
         assert!(p.one_off);
         assert_eq!(p.video.frame_rate, FrameRate::Custom(25.0));
-        assert_eq!(p.video.quality, Quality::vbr_2pass(2.0, 3.0));
+        assert_eq!(p.video.quality, Quality::vbr(Some(2.0), 3.0, 3.0, false));
+        assert!(!p.video.quality.is_two_pass());
         assert!(!p.audio.enabled);
         assert!(p.video.width.is_none());
         assert!(p.video.height.is_none());

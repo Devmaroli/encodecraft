@@ -133,10 +133,10 @@ split After Effects / Media Encoder uses.
 
 Studio H.264 (all High @ 25 fps CFR, match source size unless a screen size is set):
 
-- **Better Res** — VBR 2-pass 7/8 Mbps, AAC 192 kbps
-- **Installation** — VBR 2-pass 5/6 Mbps, AAC 192 kbps
-- **Approval Res** — VBR 2-pass 1/1.2 Mbps, AAC 128 kbps; **one-off** (not remembered)
-- **Sultan** — VBR 2-pass 2/3 Mbps, **no audio**; **one-off** (not remembered)
+- **Better Res** — VBR 2-pass min 2 / target 6.2 / max 6.2 Mbps, no audio
+- **Installation** — VBR 2-pass min 2 / target 4 / max 6 Mbps, no audio
+- **Approval Res** — VBR 2-pass min 2 stored (clamped to 1) / target 1 / max 6 Mbps, AAC 48 kHz stereo 320 kbps; **one-off** (not remembered)
+- **Sultan** — VBR 1-pass (AME H.264 default when encoding mode is omitted) min 2 / target 3 / max 3 Mbps, **no audio**; **one-off** (not remembered)
 
 Canvases with any side > 4096 use H.264 level 6.2. If the frame exceeds level 6.2, the
 queue item is flagged in-app instead of failing silently.

@@ -334,6 +334,18 @@ impl EncodeApp {
                 ui.add(egui::Spinner::new().size(11.0));
             }
             ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
+            if let Some(kbps) = job.measured_bitrate_kbps {
+                let mbps = kbps / 1000.0;
+                let min_k = job.preset.video.quality.effective_min_kbps().map(|k| k as f32);
+                let below = min_k.is_some_and(|m| kbps < m * 0.90);
+                let col = if below { t.warning } else { t.text_dim };
+                let label = if below {
+                    format!("{mbps:.1} Mbps · under min")
+                } else {
+                    format!("{mbps:.1} Mbps")
+                };
+                ui.label(RichText::new(label).size(10.5).color(col));
+            }
         });
 
         let jid = job.id.clone();
@@ -967,16 +979,31 @@ impl EncodeApp {
                     }
                 });
                 match &mut p.video.quality {
-                    Quality::Vbr2Pass { target_mbps, max_mbps } => {
-                        ui.label("Bitrate encoding    VBR, 2-pass");
+                    Quality::Vbr2Pass { target_mbps, max_mbps, min_mbps, two_pass } => {
+                        ui.label(if *two_pass { "Bitrate encoding    VBR, 2-pass" } else { "Bitrate encoding    VBR, 1-pass" });
                         ui.horizontal(|ui| {
                             ui.label("Target bitrate");
                             ui.add(egui::Slider::new(target_mbps, 0.5..=40.0).suffix(" Mbps"));
                         });
                         ui.horizontal(|ui| {
+                            let min_lab = ui.label("Minimum bitrate");
+                            let mut min_v = min_mbps.unwrap_or(0.0);
+                            let r = ui.add(egui::Slider::new(&mut min_v, 0.0..=40.0).suffix(" Mbps"));
+                            if r.changed() {
+                                *min_mbps = if min_v < 0.05 { None } else { Some(min_v) };
+                            }
+                            r.on_hover_text("Floor for the finished file’s average video bitrate. x264 VBR is not a hard floor by itself (simple slides can land far below the target — we measured 0.4 Mbps on a 7 Mbps target). When a minimum is set, EncodeCraft encodes VBR then checks ffprobe; if the average is still under the min, a filler pass (x264 nal-hrd cbr) pads the stream without changing the picture.");
+                            let _ = min_lab;
+                        });
+                        ui.horizontal(|ui| {
                             ui.label("Maximum bitrate");
                             ui.add(egui::Slider::new(max_mbps, 0.5..=50.0).suffix(" Mbps"));
                         });
+                        let warn = Quality::Vbr2Pass { target_mbps: *target_mbps, max_mbps: *max_mbps, min_mbps: *min_mbps, two_pass: *two_pass }
+                            .bitrate_order_warning();
+                        if let Some(w) = warn {
+                            ui.label(RichText::new(w).small().color(t.warning));
+                        }
                         let e10 = p.estimate_file_mb(10.0);
                         let e15 = p.estimate_file_mb(15.0);
                         ui.label(RichText::new(format!("Estimated file size   10 s ≈ {:.0} MB    15 s ≈ {:.0} MB", e10, e15)).small().color(dim));

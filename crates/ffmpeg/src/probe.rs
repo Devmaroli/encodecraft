@@ -10,6 +10,8 @@ pub struct MediaInfo {
     pub path: std::path::PathBuf,
     pub duration_sec: Option<f64>,
     pub format_name: String,
+    pub bit_rate_bps: Option<u64>,
+    pub size_bytes: Option<u64>,
     pub video: Option<VideoStream>,
     pub audio: Option<AudioStream>,
 }
@@ -21,6 +23,7 @@ pub struct VideoStream {
     pub fps: Option<f64>,
     pub codec: String,
     pub pix_fmt: String,
+    pub bit_rate_bps: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +31,7 @@ pub struct AudioStream {
     pub codec: String,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+    pub bit_rate_bps: Option<u64>,
 }
 
 impl MediaInfo {
@@ -60,6 +64,26 @@ impl MediaInfo {
             bits.join(" · ")
         }
     }
+
+    /// Average video bitrate of the finished file in kbps.
+    /// Prefers format size/duration (includes HRD filler) over stream `bit_rate`, which x264
+    /// often reports as coded bits without filler NALs.
+    pub fn video_average_kbps(&self) -> Option<f32> {
+        let total = {
+            let from_size = match (self.size_bytes.filter(|s| *s > 0), self.duration_sec.filter(|d| *d > 0.05)) {
+                (Some(sz), Some(dur)) => Some((sz as f32) * 8.0 / dur as f32),
+                _ => None,
+            };
+            from_size.or_else(|| self.bit_rate_bps.filter(|b| *b > 0).map(|b| b as f32))?
+        };
+        let audio = self.audio.as_ref().and_then(|a| a.bit_rate_bps).unwrap_or(0) as f32;
+        let video = (total - audio).max(0.0);
+        if video < 1.0 {
+            None
+        } else {
+            Some(video / 1000.0)
+        }
+    }
 }
 
 pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
@@ -75,6 +99,8 @@ pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
     let mut info = MediaInfo {
         path: path.to_path_buf(),
         format_name: raw.format.as_ref().and_then(|f| f.format_name.clone()).unwrap_or_default(),
+        bit_rate_bps: raw.format.as_ref().and_then(|f| parse_u64(f.bit_rate.as_deref())),
+        size_bytes: raw.format.as_ref().and_then(|f| parse_u64(f.size.as_deref())).or_else(|| std::fs::metadata(path).ok().map(|m| m.len())),
         ..MediaInfo::default()
     };
     if let Some(d) = raw.format.as_ref().and_then(|f| f.duration.as_ref()).and_then(|s| s.parse::<f64>().ok()) {
@@ -89,6 +115,7 @@ pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
                     fps: parse_rate(s.avg_frame_rate.as_deref()).or_else(|| parse_rate(s.r_frame_rate.as_deref())),
                     codec: s.codec_name.unwrap_or_default(),
                     pix_fmt: s.pix_fmt.unwrap_or_default(),
+                    bit_rate_bps: parse_u64(s.bit_rate.as_deref()),
                 });
             }
             Some("audio") if info.audio.is_none() => {
@@ -96,12 +123,21 @@ pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
                     codec: s.codec_name.unwrap_or_default(),
                     sample_rate: s.sample_rate.as_ref().and_then(|x| x.parse().ok()),
                     channels: s.channels.map(|c| c.min(16) as u8),
+                    bit_rate_bps: parse_u64(s.bit_rate.as_deref()),
                 });
             }
             _ => {}
         }
     }
     Ok(info)
+}
+
+fn parse_u64(s: Option<&str>) -> Option<u64> {
+    let s = s?.trim();
+    if s.is_empty() || s == "N/A" {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn parse_rate(s: Option<&str>) -> Option<f64> {
@@ -146,6 +182,8 @@ struct ProbeJson {
 struct FormatObj {
     duration: Option<String>,
     format_name: Option<String>,
+    bit_rate: Option<String>,
+    size: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +197,7 @@ struct StreamObj {
     pix_fmt: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u32>,
+    bit_rate: Option<String>,
 }
 
 #[cfg(test)]
@@ -175,5 +214,25 @@ mod tests {
     fn duration_fmt() {
         assert_eq!(format_duration(75.2), "1:15");
         assert_eq!(format_duration(3661.0), "1:01:01");
+    }
+
+    #[test]
+    fn video_average_prefers_file_size_over_stream_bitrate() {
+        let info = MediaInfo {
+            duration_sec: Some(2.0),
+            size_bytes: Some(500_000),
+            bit_rate_bps: Some(25_000),
+            video: Some(VideoStream {
+                width: 1920,
+                height: 1080,
+                fps: Some(25.0),
+                codec: "h264".into(),
+                pix_fmt: "yuv420p".into(),
+                bit_rate_bps: Some(25_000),
+            }),
+            ..MediaInfo::default()
+        };
+        let kbps = info.video_average_kbps().expect("kbps");
+        assert!((kbps - 2000.0).abs() < 1.0, "{kbps}");
     }
 }

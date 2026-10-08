@@ -703,14 +703,24 @@ impl EncodeApp {
                 Quality::Quality { value } => {
                     ui.add(egui::Slider::new(value, 1..=100).text("quality"));
                 }
-                Quality::Vbr2Pass { target_mbps, max_mbps } => {
+                Quality::Vbr2Pass { target_mbps, max_mbps, min_mbps, .. } => {
                     ui.horizontal(|ui| {
                         ui.label("Target Mbps");
-                        ui.add(egui::DragValue::new(target_mbps).range(1.0..=200.0).speed(0.5));
+                        ui.add(egui::DragValue::new(target_mbps).range(0.5..=200.0).speed(0.5));
+                        ui.label("Min Mbps");
+                        let mut min_v = min_mbps.unwrap_or(0.0);
+                        let r = ui.add(egui::DragValue::new(&mut min_v).range(0.0..=200.0).speed(0.5));
+                        if r.changed() {
+                            *min_mbps = if min_v < 0.05 { None } else { Some(min_v) };
+                        }
+                        r.on_hover_text("Finished-file average floor. x264 VBR is not a hard min (slides can land far below the target). When set, EncodeCraft encodes VBR then, if ffprobe is still under, a nal-hrd cbr filler pass pads the stream without changing the picture.");
                         ui.label("Max Mbps");
-                        ui.add(egui::DragValue::new(max_mbps).range(1.0..=250.0).speed(0.5));
+                        ui.add(egui::DragValue::new(max_mbps).range(0.5..=250.0).speed(0.5));
                     });
                 }
+            }
+            if let Some(w) = job.preset.video.quality.bitrate_order_warning() {
+                ui.label(RichText::new(w).small().color(t.warning));
             }
             if ui.button("CRF / bitrate / 2-pass").clicked() {
                 job.preset.video.quality = match job.preset.video.quality {

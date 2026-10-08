@@ -89,7 +89,7 @@ pub fn h264_unencodable_message(preset: &ExportPreset, width: u32, height: u32) 
 }
 
 fn two_pass_h264(p: &ExportPreset) -> bool {
-    p.format == OutputFormat::H264Mp4 && matches!(p.video.quality, Quality::Vbr2Pass { .. })
+    p.format == OutputFormat::H264Mp4 && p.video.quality.is_two_pass()
 }
 
 fn passlogfile_prefix(output: &Path) -> PathBuf {
@@ -272,11 +272,7 @@ fn quality_args(q: Quality, crf_flag: &str) -> Vec<String> {
         Quality::Crf { value } => vec![crf_flag.into(), value.to_string()],
         Quality::Bitrate { kbps } => vec!["-b:v".into(), format!("{kbps}k")],
         Quality::Quality { value } => vec!["-q:v".into(), jpeg_q(value).to_string()],
-        Quality::Vbr2Pass { target_mbps, max_mbps } => {
-            let t = mbps_to_kbps(target_mbps);
-            let m = mbps_to_kbps(max_mbps).max(t);
-            vec!["-b:v".into(), format!("{t}k"), "-maxrate".into(), format!("{m}k"), "-bufsize".into(), format!("{m}k")]
-        }
+        Quality::Vbr2Pass { .. } => vbr_rate_args(q, false),
     }
 }
 
@@ -304,11 +300,10 @@ fn h264(args: &mut Vec<String>, p: &ExportPreset, vf: &[String], w: u32, h: u32,
         Quality::Crf { value } => args.extend(["-crf".into(), value.to_string()]),
         Quality::Bitrate { kbps } => args.extend(["-b:v".into(), format!("{kbps}k")]),
         Quality::Quality { value } => args.extend(["-crf".into(), ((100 - value as u16) * 28 / 100).min(28).to_string()]),
-        Quality::Vbr2Pass { target_mbps, max_mbps } => {
-            let t = mbps_to_kbps(target_mbps);
-            let m = mbps_to_kbps(max_mbps).max(t);
-            args.extend(["-b:v".into(), format!("{t}k"), "-maxrate".into(), format!("{m}k"), "-bufsize".into(), format!("{m}k")]);
-        }
+        Quality::Vbr2Pass { .. } => args.extend(vbr_rate_args(p.video.quality, false)),
+    }
+    if let Some(g) = p.video.keyframe_interval.filter(|n| *n > 0) {
+        args.extend(["-g".into(), g.to_string()]);
     }
     if let FrameRate::Custom(fps) = p.video.frame_rate {
         if fps > 0.0 {
@@ -346,6 +341,45 @@ fn vp9(args: &mut Vec<String>, p: &ExportPreset, vf: &[String]) {
         Quality::Vbr2Pass { target_mbps, .. } => args.extend(["-b:v".into(), format!("{}k", mbps_to_kbps(target_mbps))]),
     }
     push_vf(args, vf);
+}
+
+/// VBR ABR + VBV. `minrate` is x264's soft request; a later `nal-hrd=cbr` filler pass is the hard floor.
+pub fn vbr_rate_args(q: Quality, hrd_cbr: bool) -> Vec<String> {
+    let Some((min, target, max, _)) = q.vbr_parts() else {
+        return Vec::new();
+    };
+    let t = mbps_to_kbps(target);
+    let m = mbps_to_kbps(max).max(t);
+    let buf = m.saturating_mul(2).max(m);
+    let mut a = vec!["-b:v".into(), format!("{t}k"), "-maxrate".into(), format!("{m}k"), "-bufsize".into(), format!("{buf}k")];
+    if let Some(k) = min.map(mbps_to_kbps).map(|k| k.min(t)).filter(|k| *k > 0) {
+        a.extend(["-minrate".into(), format!("{k}k")]);
+    }
+    if hrd_cbr {
+        a.extend(["-x264-params".into(), "nal-hrd=cbr".into()]);
+    }
+    a
+}
+
+/// Index of the output path (last argv). Encoder options must come *before* it.
+fn output_arg_index(args: &[String]) -> usize {
+    args.len().saturating_sub(1)
+}
+
+/// Insert `-x264-params nal-hrd=cbr` before the output path. Appending after the
+/// filename makes FFmpeg treat the flags as another output and skip filler NALs.
+pub fn inject_hrd_cbr(args: &mut Vec<String>) {
+    if let Some(i) = args.iter().position(|a| a == "-x264-params") {
+        if let Some(v) = args.get_mut(i + 1) {
+            if !v.contains("nal-hrd") {
+                v.push_str(":nal-hrd=cbr");
+            }
+            return;
+        }
+    }
+    let at = output_arg_index(args);
+    args.insert(at, "-x264-params".into());
+    args.insert(at + 1, "nal-hrd=cbr".into());
 }
 
 fn gif(args: &mut Vec<String>, p: &ExportPreset, w: u32, h: u32) {
@@ -595,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn better_res_is_high_2pass_7mbps() {
+    fn better_res_is_high_2pass_6_2_mbps() {
         let lib = PresetLibrary::new();
         let mut p = lib.get("system.better-res").unwrap();
         p.video.width = Some(1920);
@@ -612,8 +646,10 @@ mod tests {
         let p1 = plans[0].args.join(" ");
         let p2 = plans[1].args.join(" ");
         assert!(p1.contains("-profile:v high"));
-        assert!(p1.contains("-b:v 7000k"));
-        assert!(p1.contains("-maxrate 8000k"));
+        assert!(p1.contains("-b:v 6200k"));
+        assert!(p1.contains("-maxrate 6200k"));
+        assert!(p1.contains("-minrate 2000k"));
+        assert!(p1.contains("-g 72"));
         assert!(p1.contains("-pass 1"));
         assert!(p1.contains("-an"));
         assert!(p1.contains("-f null"));
@@ -622,8 +658,7 @@ mod tests {
         assert!(p2.contains("-fps_mode cfr"));
         assert!(p2.contains("-movflags +faststart"));
         assert!(!p1.contains("-level:v"));
-        let inst = lib.get("system.installation").unwrap();
-        let mut inst = inst;
+        let mut inst = lib.get("system.installation").unwrap();
         inst.video.width = Some(1920);
         inst.video.height = Some(1080);
         let s = build_encode_plan(PlanInput {
@@ -636,8 +671,10 @@ mod tests {
         })
         .args
         .join(" ");
-        assert!(s.contains("-b:v 5000k"));
+        assert!(s.contains("-b:v 4000k"));
         assert!(s.contains("-maxrate 6000k"));
+        assert!(s.contains("-minrate 2000k"));
+        assert!(s.contains("-an"), "{s}");
     }
 
     #[test]
@@ -661,8 +698,16 @@ mod tests {
             path: PathBuf::from("in.mp4"),
             duration_sec: Some(10.0),
             format_name: "mp4".into(),
-            video: Some(VideoStream { width: 1080, height: 1080, fps: Some(25.0), codec: "prores".into(), pix_fmt: "yuv422p10le".into() }),
+            video: Some(VideoStream {
+                width: 1080,
+                height: 1080,
+                fps: Some(25.0),
+                codec: "prores".into(),
+                pix_fmt: "yuv422p10le".into(),
+                bit_rate_bps: None,
+            }),
             audio: None,
+            ..MediaInfo::default()
         };
         let s = build_encode_plan(PlanInput {
             source: Path::new("in.mp4"),
@@ -679,23 +724,38 @@ mod tests {
     }
 
     #[test]
-    fn sultan_is_2_3_mbps_without_audio() {
+    fn sultan_is_vbr_1pass_3mbps_without_audio() {
         let lib = PresetLibrary::new();
         let p = lib.get("system.sultan").unwrap();
-        let s = build_encode_plan(PlanInput {
+        let plans = build_encode_plans(PlanInput {
             source: Path::new("in.mp4"),
             output: PathBuf::from("out.mp4"),
             preset: &p,
             trim: Trim::default(),
             media: None,
             sequence_start: None,
-        })
-        .args
-        .join(" ");
-        assert!(s.contains("-b:v 2000k"), "{s}");
+        });
+        assert_eq!(plans.len(), 1, "Sultan is VBR 1-pass");
+        let s = plans[0].args.join(" ");
+        assert!(s.contains("-b:v 3000k"), "{s}");
         assert!(s.contains("-maxrate 3000k"), "{s}");
+        assert!(s.contains("-minrate 2000k"), "{s}");
         assert!(s.contains("-an"), "{s}");
+        assert!(!s.contains("-pass "), "{s}");
         assert!(!s.contains("pad=1920:1080"), "{s}");
+    }
+
+    #[test]
+    fn hrd_cbr_is_injected_before_output_path() {
+        let mut args = vec!["-c:v".into(), "libx264".into(), "-b:v".into(), "2000k".into(), "/out/ad.mp4".into()];
+        inject_hrd_cbr(&mut args);
+        assert_eq!(args.last().as_deref(), Some("/out/ad.mp4"));
+        let i = args.iter().position(|a| a == "-x264-params").expect("x264-params");
+        assert_eq!(args[i + 1], "nal-hrd=cbr");
+        assert!(i < args.len() - 1);
+        inject_hrd_cbr(&mut args);
+        assert_eq!(args.iter().filter(|a| *a == "-x264-params").count(), 1);
+        assert!(!args[i + 1].contains("nal-hrd=cbr:nal-hrd"));
     }
 
     #[test]

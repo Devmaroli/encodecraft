@@ -103,6 +103,9 @@ pub struct Job {
     pub started_ms: Option<u64>,
     #[serde(default)]
     pub finished_ms: Option<u64>,
+    /// ffprobe average video bitrate of the finished file (kbps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_bitrate_kbps: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -542,6 +545,7 @@ impl EncodeQueue {
                 created_ms: unix_ms(),
                 started_ms: None,
                 finished_ms: None,
+                measured_bitrate_kbps: None,
             });
         }
         Ok(jobs)
@@ -725,6 +729,8 @@ mod tests {
             ScreenSize::new("1st Ring Road", 1008, 5184),
             ScreenSize::new("Al Nassar Tower Vertical", 960, 5328),
             ScreenSize::new("Kuwait Gate", 4460, 378),
+            ScreenSize::new("Eye of Kuwait", 7560, 2100),
+            ScreenSize::new("Honor 400", 1080, 1080),
         ];
         let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
         assert_eq!(jobs[0].preset.id, "system.better-res");
@@ -739,6 +745,10 @@ mod tests {
         assert_eq!(jobs[4].preset.id, "system.better-res");
         assert_eq!(jobs[5].preset_reason, Some(PresetReason::UltraWide));
         assert_eq!(jobs[5].preset.id, "system.better-res");
+        assert_eq!(jobs[6].preset.id, "system.better-res");
+        assert_eq!(jobs[6].preset_reason, Some(PresetReason::ListedScreen));
+        assert_eq!(jobs[7].preset.id, "system.installation");
+        assert_eq!(jobs[7].preset_reason, Some(PresetReason::OtherScreen));
     }
 
     #[test]

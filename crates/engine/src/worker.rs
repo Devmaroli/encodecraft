@@ -129,7 +129,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         JobSource::File { sequence_start, .. } => *sequence_start,
         JobSource::EffectCraft { .. } => None,
     };
-    encode_with_stall(
+    let result = encode_with_stall(
         &ff,
         &source_file,
         job.output.clone(),
@@ -168,6 +168,17 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
             });
         },
     )?;
+    h.lock(|s| {
+        if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
+            j.measured_bitrate_kbps = result.measured_video_kbps;
+            if let Some(kbps) = result.measured_video_kbps {
+                s.push_log(format!("{}: average {:.2} Mbps", id, kbps / 1000.0));
+            }
+            if result.min_bitrate_warning {
+                s.push_log(format!("{}: finished under the preset minimum bitrate", id));
+            }
+        }
+    });
     Ok(())
 }
 

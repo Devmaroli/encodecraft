@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::command::{build_encode_plans, h264_unencodable_message, PlanInput};
+use super::command::{build_encode_plan, build_encode_plans, h264_unencodable_message, inject_hrd_cbr, PlanInput};
 use super::probe::{self, MediaInfo};
 use super::progress::{parse_progress_line, EncodeProgress};
 use super::{Ffmpeg, FfmpegError};
@@ -35,6 +35,10 @@ pub struct EncodeResult {
     pub output: PathBuf,
     pub log: String,
     pub progress: EncodeProgress,
+    /// ffprobe average video bitrate of the finished file.
+    pub measured_video_kbps: Option<f32>,
+    /// True when a min bitrate was set and the finished file still sits under it.
+    pub min_bitrate_warning: bool,
 }
 
 pub const DEFAULT_STALL_SECS: u64 = 120;
@@ -107,10 +111,93 @@ pub fn encode_with_stall(
     }
     replace_file(&tmp_out, &final_out)?;
     cleanup_passlog(stats.as_deref());
+
+    let (measured_video_kbps, min_bitrate_warning, extra) =
+        enforce_min_bitrate(ff, source, &final_out, preset, trim, media, sequence_start, stall_secs, stop, &mut progress, &mut on_progress, &mut on_log)?;
+    log.push_str(&extra);
+
     progress.done = true;
     progress.percent = 100.0;
     on_progress(&progress);
-    Ok(EncodeResult { output: final_out, log, progress })
+    Ok(EncodeResult { output: final_out, log, progress, measured_video_kbps, min_bitrate_warning })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enforce_min_bitrate(
+    ff: &Ffmpeg,
+    source: &Path,
+    final_out: &Path,
+    preset: &ExportPreset,
+    trim: Trim,
+    media: Option<&MediaInfo>,
+    sequence_start: Option<u32>,
+    stall_secs: u64,
+    stop: &EncodeStop,
+    progress: &mut EncodeProgress,
+    on_progress: &mut impl FnMut(&EncodeProgress),
+    on_log: &mut impl FnMut(&str),
+) -> Result<(Option<f32>, bool, String), FfmpegError> {
+    let mut extra = String::new();
+    let info = probe::probe(ff, final_out).ok();
+    let mut measured = info.as_ref().and_then(MediaInfo::video_average_kbps);
+    let Some(min_k) = preset.video.quality.effective_min_kbps() else {
+        return Ok((measured, false, extra));
+    };
+    let min_f = min_k as f32;
+    // Short clips + mux overhead typically land ~10% under the HRD target.
+    if measured.unwrap_or(0.0) >= min_f * 0.90 {
+        return Ok((measured, false, extra));
+    }
+    let msg = format!(
+        "average {:.2} Mbps is below min {:.2} Mbps — filler pass (nal-hrd cbr, picture unchanged)",
+        measured.unwrap_or(0.0) / 1000.0,
+        min_f / 1000.0
+    );
+    extra.push_str(&msg);
+    extra.push('\n');
+    on_log(&msg);
+
+    let mut floor = preset.clone();
+    if let encodecraft_presets::Quality::Vbr2Pass { max_mbps, .. } = floor.video.quality {
+        let min_m = floor.video.quality.effective_min_mbps().unwrap_or(min_f as f64 / 1000.0);
+        // x264 HRD on short clips often lands ~10% under -b:v. Aim a little over the
+        // min (capped at max) so the finished-file average still clears the floor.
+        let cbr = (min_m / 0.90).min(max_mbps.max(min_m));
+        floor.video.quality = encodecraft_presets::Quality::Vbr2Pass {
+            target_mbps: cbr,
+            max_mbps: cbr,
+            min_mbps: Some(cbr),
+            two_pass: false,
+        };
+    }
+    let tmp = partial_output(final_out);
+    let mut plan = build_encode_plan(PlanInput {
+        source,
+        output: tmp.clone(),
+        preset: &floor,
+        trim,
+        media,
+        sequence_start,
+    });
+    inject_hrd_cbr(&mut plan.args);
+    on_log(&plan.display_cmdline(&ff.ffmpeg));
+    let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));
+    match run_one_plan(ff, &plan, duration, stall_secs, stop, progress, &mut extra, on_progress, on_log, 0, 1) {
+        Ok(()) => {
+            replace_file(&tmp, final_out)?;
+        }
+        Err(e) => {
+            let _ = remove_partial(&tmp);
+            extra.push_str(&format!("filler pass failed ({e}); keeping VBR encode\n"));
+            on_log("filler pass failed; keeping VBR encode");
+            let warn = measured.map(|a| a < min_f * 0.90).unwrap_or(true);
+            return Ok((measured, warn, extra));
+        }
+    }
+    let info2 = probe::probe(ff, final_out).ok();
+    measured = info2.as_ref().and_then(MediaInfo::video_average_kbps).or(measured);
+    let warn = measured.map(|a| a < min_f * 0.90).unwrap_or(false);
+    Ok((measured, warn, extra))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,5 +552,67 @@ mod tests {
 
     fn unix_nanos() -> u128 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    }
+
+    /// lavfi → each studio preset on a near-static slide and a busy testsrc; ffprobe average ≥ min.
+    #[test]
+    fn studio_presets_hit_min_bitrate_static_and_busy() {
+        let Ok(ff) = crate::find_ffmpeg() else {
+            eprintln!("skip: ffmpeg not on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ec-studio-br-{}-{}", std::process::id(), unix_nanos()));
+        let _ = std::fs::create_dir_all(&dir);
+        let static_src = dir.join("static.mp4");
+        let busy_src = dir.join("busy.mp4");
+        let mk = |filter: &str, dest: &Path| {
+            let st = Command::new(&ff.ffmpeg)
+                .args([
+                    "-hide_banner", "-y",
+                    "-f", "lavfi", "-i", filter,
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                    "-t", "2", "-shortest",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                ])
+                .arg(dest)
+                .status()
+                .expect("lavfi");
+            assert!(st.success(), "lavfi failed for {}", dest.display());
+        };
+        mk("color=c=0xCC3300:s=1920x1080:r=25,drawbox=x=80:y=80:w=640:h=120:color=white:t=fill", &static_src);
+        mk("testsrc2=size=1920x1080:rate=25", &busy_src);
+
+        let lib = encodecraft_presets::PresetLibrary::new();
+        let ids = ["system.better-res", "system.installation", "system.approval-res", "system.sultan"];
+        let mut rows = Vec::new();
+        for id in ids {
+            let preset = lib.get(id).unwrap();
+            let min = preset.video.quality.effective_min_mbps().unwrap_or(0.0);
+            let max = preset.video.quality.max_kbps().map(|k| k as f64 / 1000.0).unwrap_or(99.0);
+            for (clip, src) in [("static", &static_src), ("busy", &busy_src)] {
+                let out = dir.join(format!("{id}-{clip}.mp4"));
+                let result = encode(&ff, src, out.clone(), &preset, encodecraft_job::Trim::default(), None, &EncodeStop::new(), |_| {}, |_| {}).unwrap();
+                let info = crate::probe(&ff, &out).unwrap();
+                let mbps = info.video_average_kbps().or(result.measured_video_kbps).unwrap_or(0.0) / 1000.0;
+                let has_audio = info.audio.is_some();
+                let want_audio = id == "system.approval-res";
+                let audio_ok = has_audio == want_audio;
+                let min_ok = mbps + 0.05 >= min as f32 * 0.90;
+                let max_ok = mbps <= max as f32 * 1.25 + 0.05;
+                let pass = min_ok && max_ok && audio_ok;
+                rows.push((id, clip, mbps, min, max, has_audio, pass));
+                assert!(
+                    pass,
+                    "{id} {clip}: {mbps:.3} Mbps (min {min} max {max}) audio={has_audio} want_audio={want_audio} filler_warn={} log_tail={}",
+                    result.min_bitrate_warning,
+                    result.log.chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()
+                );
+            }
+        }
+        eprintln!("preset            clip     Mbps   min    max    audio  pass");
+        for (id, clip, mbps, min, max, audio, pass) in &rows {
+            eprintln!("{id:<18} {clip:<7} {mbps:>5.2}  {min:>4.1}  {max:>4.1}  {audio:<5}  {}", if *pass { "ok" } else { "FAIL" });
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

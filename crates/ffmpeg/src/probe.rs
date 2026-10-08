@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use serde::Deserialize;
 
@@ -87,7 +86,7 @@ impl MediaInfo {
 }
 
 pub fn probe(ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, FfmpegError> {
-    let out = Command::new(&ff.ffprobe)
+    let out = super::proc::command(&ff.ffprobe)
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
         .arg(super::command::argv_path(path))
         .stdin(std::process::Stdio::null())

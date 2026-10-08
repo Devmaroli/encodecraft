@@ -139,7 +139,12 @@ impl EncodeApp {
         if let Some(tex) = self.preview_tex.get(id) {
             ui.painter().image(tex.id(), img, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         } else {
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Waiting for frame…", FontId::proportional(13.0), t.text_faint);
+            let msg = if self.jobs_cache.iter().find(|j| j.id == id).is_some_and(|j| j.progress.stage == "Rendering comp") {
+                "Rendering composition…"
+            } else {
+                "Waiting for frame…"
+            };
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, FontId::proportional(13.0), t.text_faint);
         }
 
         if src_w > 0 && src_h > 0 {
@@ -159,6 +164,9 @@ impl EncodeApp {
     fn preview_stats(&self, ui: &mut Ui, t: &Tokens, job: &Job, detailed: bool) {
         let name = job.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| job.source.display_name());
         ui.add(egui::Label::new(RichText::new(name).strong().color(t.text)).truncate());
+        if !job.progress.stage.is_empty() {
+            ui.label(RichText::new(&job.progress.stage).color(t.accent).size(12.0));
+        }
 
         let pct = job.progress.percent.clamp(0.0, 100.0);
         let bar_w = ui.available_width().max(40.0);

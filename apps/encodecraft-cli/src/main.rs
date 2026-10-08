@@ -168,6 +168,10 @@ fn enqueue_cmd(args: &[String]) -> Result<(), String> {
     if encodecraft_engine::try_connect(port) {
         let ids = encodecraft_engine::post_enqueue(port, &req).map_err(|e| e.to_string())?;
         println!("queued {}", ids.join(" "));
+        if flag(args, "--start") {
+            encodecraft_engine::post_start(port).map_err(|e| e.to_string())?;
+            println!("queue started");
+        }
         return Ok(());
     }
     let path = drop_inbox(&req).map_err(|e| e.to_string())?;
@@ -208,7 +212,7 @@ fn build_request(args: &[String]) -> Result<EnqueueRequest, String> {
         sizes,
         trim: None,
         scale: opt(args, "--scale").and_then(ScaleMode::parse_name),
-        start_queue: flag(args, "--start"),
+        start_queue: false,
     })
 }
 
@@ -258,7 +262,7 @@ fn launch_app() {
     }
     candidates.push(PathBuf::from(name));
     for c in candidates {
-        if std::process::Command::new(&c).spawn().is_ok() {
+        if encodecraft_ffmpeg::hidden_command(&c).spawn().is_ok() {
             eprintln!("launched {}", c.display());
             return;
         }

@@ -15,6 +15,7 @@ mod command;
 mod detect;
 mod preview;
 mod probe;
+mod proc;
 mod progress;
 mod run;
 
@@ -22,6 +23,7 @@ pub use command::{
     argv_path, build_encode_plan, build_encode_plans, even, h264_level_for_frame, h264_unencodable_message, sequence_pattern, EncodePlan, PlanInput,
 };
 pub use detect::{find_effectcraft_cli, find_effectcraft_cli_with, find_ffmpeg, find_ffmpeg_at, sidecar_ffmpeg, EffectcraftLookup, Ffmpeg};
+pub use proc::{command as hidden_command, hide_window};
 pub use preview::{frame_at_25, grab_preview_jpeg, letterbox_fit, preview_pixel_size, timecode_25, PREVIEW_MAX_LONG};
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use progress::{parse_progress_line, EncodeProgress};

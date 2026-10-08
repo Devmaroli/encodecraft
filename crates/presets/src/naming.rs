@@ -1,21 +1,25 @@
 //! Output file naming templates.
 //!
-//! Tokens: `{name}`, `{width}`, `{height}`, `{preset}`, `{codec}`, `{ext}`, `{date}`, `{time}`,
-//! `{job}`, `{index}`, `{screen}`. Unknown tokens are left in place. Path separators in values
-//! are replaced so a template cannot escape the output directory.
+//! Tokens: `{comp}`, `{name}`, `{project}`, `{width}`, `{height}`, `{preset}`, `{codec}`, `{ext}`,
+//! `{date}`, `{time}`, `{job}`, `{index}`, `{screen}`. Unknown tokens are left in place.
+//! Path separators in values are replaced so a template cannot escape the output directory.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use encodecraft_job::JobSource;
+
 use super::ExportPreset;
 
 pub fn default_template() -> &'static str {
-    "{name}_{width}x{height}"
+    "{comp}"
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct NamingContext {
     pub name: String,
+    pub comp: String,
+    pub project: String,
     pub width: u32,
     pub height: u32,
     pub preset: String,
@@ -31,8 +35,31 @@ pub struct NamingContext {
 impl NamingContext {
     pub fn from_preset(source_name: &str, preset: &ExportPreset, width: u32, height: u32, job: &str, index: u32, screen: &str) -> Self {
         let (date, time) = local_stamp();
+        let stem = sanitize_filename(source_name);
         Self {
-            name: sanitize_filename(source_name),
+            name: stem.clone(),
+            comp: stem,
+            project: String::new(),
+            width,
+            height,
+            preset: sanitize_filename(&preset.name),
+            codec: preset.format.extension().into(),
+            ext: preset.extension().into(),
+            job: sanitize_filename(job),
+            index,
+            screen: sanitize_filename(screen),
+            date,
+            time,
+        }
+    }
+
+    pub fn from_source(source: &JobSource, preset: &ExportPreset, width: u32, height: u32, job: &str, index: u32, screen: &str) -> Self {
+        let (date, time) = local_stamp();
+        let comp = sanitize_filename(&source.comp_name());
+        Self {
+            name: comp.clone(),
+            comp,
+            project: sanitize_filename(&source.project_name()),
             width,
             height,
             preset: sanitize_filename(&preset.name),
@@ -49,6 +76,8 @@ impl NamingContext {
     pub fn tokens(&self) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("name".into(), self.name.clone());
+        m.insert("comp".into(), self.comp.clone());
+        m.insert("project".into(), self.project.clone());
         m.insert("width".into(), if self.width == 0 { "src".into() } else { self.width.to_string() });
         m.insert("height".into(), if self.height == 0 { "src".into() } else { self.height.to_string() });
         m.insert("preset".into(), self.preset.clone());
@@ -61,6 +90,10 @@ impl NamingContext {
         m.insert("time".into(), self.time.clone());
         m
     }
+}
+
+pub fn naming_uses_size(template: &str) -> bool {
+    template.contains("{width}") || template.contains("{height}")
 }
 
 pub fn apply_template(template: &str, ctx: &NamingContext) -> String {
@@ -124,8 +157,8 @@ pub fn sanitize_filename(s: &str) -> String {
     if is_windows_reserved(&t) {
         t = format!("_{t}");
     }
-    if t.chars().count() > 120 {
-        t = t.chars().take(120).collect();
+    if t.chars().count() > 240 {
+        t = t.chars().take(240).collect();
         t = t.trim_matches('.').trim().to_string();
         if t.is_empty() {
             t = "untitled".into();
@@ -202,7 +235,7 @@ pub fn unique_output_path(path: PathBuf, overwrite: bool) -> PathBuf {
             };
             let parent = seq_dir.parent().unwrap_or(Path::new("."));
             let stem = seq_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "seq".into());
-            let new_dir = parent.join(format!("{stem}-{n}"));
+            let new_dir = parent.join(format!("{stem} ({n})"));
             if !new_dir.exists() {
                 return new_dir.join(path.file_name().unwrap_or_default());
             }
@@ -210,7 +243,7 @@ pub fn unique_output_path(path: PathBuf, overwrite: bool) -> PathBuf {
             let parent = path.parent().unwrap_or(Path::new("."));
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
             let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-            let cand = parent.join(format!("{stem}-{n}{ext}"));
+            let cand = parent.join(format!("{stem} ({n}){ext}"));
             if !cand.exists() {
                 return cand;
             }
@@ -326,7 +359,8 @@ mod tests {
         std::fs::write(&p, b"x").unwrap();
         let u = unique_output_path(p.clone(), false);
         assert_ne!(u, p);
-        assert!(u.file_name().unwrap().to_string_lossy().contains("clip-2"));
+        let name = u.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.contains("clip (2)"), "{name}");
         let same = unique_output_path(p.clone(), true);
         assert_eq!(same, p);
         let _ = std::fs::remove_dir_all(&dir);

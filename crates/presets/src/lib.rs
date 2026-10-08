@@ -6,7 +6,8 @@ mod naming;
 mod screen_rules;
 
 pub use naming::{
-    apply_template, constrain_output_dir, default_template, is_under, normalize_path, output_path, sanitize_filename, unique_output_path, NamingContext,
+    apply_template, constrain_output_dir, default_template, is_under, naming_uses_size, normalize_path, output_path, sanitize_filename, unique_output_path,
+    NamingContext,
 };
 pub use screen_rules::{
     infer_screen_from_text, normalize_screen_name, PresetPick, PresetReason, ScreenMatchRule, ScreenPresetRules,
@@ -313,6 +314,12 @@ pub struct VideoSettings {
     /// GOP / keyframe distance in frames (`-g`). Studio AME presets use 72.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyframe_interval: Option<u32>,
+    /// When the global GPU toggle is on, this H.264 preset may use NVIDIA NVENC.
+    #[serde(default)]
+    pub allow_gpu: bool,
+    /// Runtime: this encode should use `h264_nvenc` (not persisted).
+    #[serde(default, skip_serializing)]
+    pub use_nvenc: bool,
 }
 
 fn default_quality() -> Quality {
@@ -331,6 +338,8 @@ impl Default for VideoSettings {
             h264_profile: None,
             h264_level: None,
             keyframe_interval: None,
+            allow_gpu: false,
+            use_nvenc: false,
         }
     }
 }
@@ -875,6 +884,7 @@ fn studio_h264(
             h264_profile: Some("high".into()),
             h264_level: Some("auto".into()),
             keyframe_interval: Some(72),
+            allow_gpu: true,
             ..VideoSettings::default()
         },
         audio: AudioSettings { enabled: audio, ..AudioSettings::default() },
@@ -934,7 +944,9 @@ pub fn parse_size_list(s: &str) -> Result<Vec<ScreenSize>, PresetError> {
 /// Tokens available to naming templates.
 pub fn naming_tokens() -> BTreeMap<&'static str, &'static str> {
     let mut m = BTreeMap::new();
-    m.insert("name", "source file stem or composition name");
+    m.insert("comp", "composition name, or the dropped file's base name");
+    m.insert("name", "same as {comp} (kept for older templates)");
+    m.insert("project", "EffectCraft project file stem");
     m.insert("width", "output width in pixels");
     m.insert("height", "output height in pixels");
     m.insert("preset", "preset name slug");

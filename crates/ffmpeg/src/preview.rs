@@ -3,7 +3,10 @@
 //! Independent of the main encode graph so turning the panel off costs nothing.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[cfg(test)]
+use std::process::Command;
 
 use super::command::{argv_path, even};
 use super::{Ffmpeg, FfmpegError};
@@ -86,7 +89,7 @@ pub fn grab_preview_jpeg(
     } else {
         format!("scale={dw}:{dh}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={dw}:{dh}:(ow-iw)/2:(oh-ih)/2:black")
     };
-    let mut cmd = Command::new(&ff.ffmpeg);
+    let mut cmd = super::proc::command(&ff.ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     if growing {
         cmd.args(["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt", "-sseof", "-0.4"]);

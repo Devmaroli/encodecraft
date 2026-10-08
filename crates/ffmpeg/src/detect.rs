@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use encodecraft_job::{EFFECTCRAFT_CLI_ENV, FFMPEG_ENV};
 
+use super::proc;
 use super::FfmpegError;
 
 #[derive(Clone, Debug)]
@@ -10,6 +10,8 @@ pub struct Ffmpeg {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
     pub version: String,
+    /// True when this FFmpeg build lists `h264_nvenc`.
+    pub nvenc: bool,
 }
 
 impl Ffmpeg {
@@ -77,7 +79,8 @@ fn ffmpeg_from(ffmpeg: PathBuf) -> Result<Ffmpeg, FfmpegError> {
         .unwrap_or_else(|| ffmpeg.clone());
     let ffprobe = std::fs::canonicalize(&ffprobe).unwrap_or(ffprobe);
     let version = read_version(&ffmpeg).unwrap_or_else(|_| "ffmpeg".into());
-    Ok(Ffmpeg { ffmpeg, ffprobe, version })
+    let nvenc = probe_nvenc(&ffmpeg);
+    Ok(Ffmpeg { ffmpeg, ffprobe, version, nvenc })
 }
 
 /// Inputs for [`find_effectcraft_cli_with`] so tests can inject registry / PATH without HKCU.
@@ -152,7 +155,7 @@ fn cli_name() -> &'static str {
 
 #[cfg(windows)]
 fn effectcraft_registry_install_dir() -> Option<PathBuf> {
-    let out = Command::new("reg")
+    let out = proc::command("reg")
         .args(["query", r"HKCU\Software\effectcraft", "/v", "InstallDir"])
         .output()
         .ok()?;
@@ -263,9 +266,17 @@ fn is_exe(p: &Path) -> bool {
 }
 
 fn read_version(ffmpeg: &Path) -> Result<String, FfmpegError> {
-    let out = Command::new(ffmpeg).arg("-version").output()?;
+    let out = proc::command(ffmpeg).arg("-version").output()?;
     let s = String::from_utf8_lossy(&out.stdout);
     Ok(s.lines().next().unwrap_or("ffmpeg").to_string())
+}
+
+fn probe_nvenc(ffmpeg: &Path) -> bool {
+    let out = proc::command(ffmpeg).args(["-hide_banner", "-encoders"]).output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("h264_nvenc"),
+        Err(_) => false,
+    }
 }
 
 fn ffmpeg_candidates() -> Vec<PathBuf> {

@@ -107,7 +107,7 @@ pub fn run(h: Handle) {
                     sizes: w.sizes.clone(),
                     trim: None,
                     scale: None,
-                    start_queue: true,
+                    start_queue: false,
                 };
                 let _ = h.enqueue_trusted(req);
             }

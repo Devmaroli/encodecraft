@@ -212,19 +212,26 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
         match EnqueueRequest::from_json(&body) {
             Ok(req) => match handle.enqueue(req) {
                 Ok(ids) => {
-                    handle.lock(|s| s.push_log(format!("Queued {} job(s) from EffectCraft / HTTP", ids.len())));
-                    (200, serde_json::to_string(&EnqueueReply { ok: true, ids, error: None }).unwrap_or_else(|_| "{}".into()))
+                    let n = ids.len();
+                    let running = handle.lock(|s| s.queue.running);
+                    handle.lock(|s| s.push_log(format!("Queued {n} job(s) from EffectCraft / HTTP")));
+                    let message = if running {
+                        format!("{n} job{} added", if n == 1 { "" } else { "s" })
+                    } else {
+                        format!("{n} job{} added · Start", if n == 1 { "" } else { "s" })
+                    };
+                    (200, serde_json::to_string(&EnqueueReply { ok: true, ids, error: None, message: Some(message) }).unwrap_or_else(|_| "{}".into()))
                 }
                 Err(e) => {
                     let msg = e.to_string();
                     handle.lock(|s| s.push_log(format!("Enqueue rejected (HTTP 400): {msg}")));
-                    (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg) }).unwrap_or_else(|_| "{}".into()))
+                    (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg), message: None }).unwrap_or_else(|_| "{}".into()))
                 }
             },
             Err(e) => {
                 let msg = e.to_string();
                 handle.lock(|s| s.push_log(format!("Enqueue rejected (HTTP 400): {msg}")));
-                (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg) }).unwrap_or_else(|_| "{}".into()))
+                (400, serde_json::to_string(&EnqueueReply { ok: false, ids: vec![], error: Some(msg), message: None }).unwrap_or_else(|_| "{}".into()))
             }
         }
     } else if method == "POST" && (path == "/v1/control" || path == "/control") {
@@ -235,6 +242,9 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
             }
             Err(e) => (400, serde_json::json!({"ok": false, "error": e.to_string()}).to_string()),
         }
+    } else if method == "POST" && (path == "/v1/queue/start" || path == "/queue/start") {
+        handle.lock(|s| s.queue.start());
+        (200, serde_json::json!({"ok": true, "running": true}).to_string())
     } else if method == "GET" && path == "/v1/queue" {
         match handle.dispatch("queue.list", &serde_json::json!({})) {
             Ok(v) => (200, v.to_string()),
@@ -330,6 +340,16 @@ pub fn post_enqueue(port: u16, req: &EnqueueRequest) -> Result<Vec<String>, Engi
         Ok(reply.ids)
     } else {
         Err(EngineError::Message(reply.error.unwrap_or_else(|| "enqueue failed".into())))
+    }
+}
+
+pub fn post_start(port: u16) -> Result<(), EngineError> {
+    let tok = token::current();
+    let resp = http_post(port, "/v1/queue/start", b"{}", tok.as_deref())?;
+    if resp.contains("\"ok\":true") || resp.contains("\"running\":true") {
+        Ok(())
+    } else {
+        Err(EngineError::Message(resp))
     }
 }
 

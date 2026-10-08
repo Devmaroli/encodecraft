@@ -1,10 +1,12 @@
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use encodecraft_ffmpeg::{effectcraft_render_args, encode_with_stall, find_effectcraft_cli, find_ffmpeg_at, mezzanine_path, probe, EncodeStop};
+use encodecraft_ffmpeg::{effectcraft_render_args, encode_with_stall, find_effectcraft_cli, find_ffmpeg_at, hidden_command, mezzanine_path, probe, EncodeStop};
 use encodecraft_job::JobSource;
+use encodecraft_presets::OutputFormat;
 use encodecraft_queue::{unix_ms, JobStatus};
 
 use crate::fsutil;
@@ -96,7 +98,22 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let override_path = h.lock(|s| s.settings.ffmpeg_path.clone());
     let ff = find_ffmpeg_at(override_path.as_deref())?;
 
-    let source_file = resolve_source(h, &job, &stop)?;
+    let nvenc_ok = ff.nvenc;
+    let gpu_on = h.lock(|s| s.settings.gpu_encode);
+    let use_nvenc = gpu_on && nvenc_ok && job.preset.video.allow_gpu && job.preset.format == OutputFormat::H264Mp4;
+    let mut preset = job.preset.clone();
+    preset.video.use_nvenc = use_nvenc;
+    let encoder_label = if use_nvenc { "GPU" } else { "CPU" };
+    h.lock(|s| {
+        if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
+            j.encoder_used = Some(encoder_label.into());
+        }
+    });
+    let has_render = job.source.is_effectcraft();
+    let render_weight = if has_render { 0.52_f32 } else { 0.0 };
+    let started_ms = job.started_ms.unwrap_or_else(unix_ms);
+
+    let source_file = resolve_source(h, &job, &stop, render_weight, started_ms)?;
     let media = probe(&ff, &source_file).ok();
     let mut job = job;
     if let Some(ref m) = media {
@@ -133,7 +150,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         &ff,
         &source_file,
         job.output.clone(),
-        &job.preset,
+        &preset,
         job.trim,
         media.as_ref(),
         sequence_start,
@@ -148,6 +165,15 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
             *last = std::time::Instant::now();
             h_prog.lock(|s| {
                 if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
+                    let mut snap = snap;
+                    if render_weight > 0.0 {
+                        snap.percent = (render_weight * 100.0) + snap.percent * (1.0 - render_weight);
+                    }
+                    let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
+                    if snap.percent > 2.0 && elapsed > 0.4 {
+                        let total = elapsed / (snap.percent as f64 / 100.0);
+                        snap.eta_sec = Some((total - elapsed).max(0.0));
+                    }
                     j.progress = snap;
                 }
             });
@@ -182,7 +208,13 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     Ok(())
 }
 
-fn resolve_source(h: &Handle, job: &encodecraft_queue::Job, stop: &EncodeStop) -> Result<PathBuf, crate::EngineError> {
+fn resolve_source(
+    h: &Handle,
+    job: &encodecraft_queue::Job,
+    stop: &EncodeStop,
+    render_weight: f32,
+    started_ms: u64,
+) -> Result<PathBuf, crate::EngineError> {
     match &job.source {
         JobSource::File { path, .. } => {
             if fsutil::is_symlink(path) {
@@ -204,28 +236,140 @@ fn resolve_source(h: &Handle, job: &encodecraft_queue::Job, stop: &EncodeStop) -
                 std::fs::create_dir_all(dir)?;
             }
             let args = effectcraft_render_args(&cli, &job.source, &out)?;
-            h.lock(|s| s.push_log(format!("{}: rendering EffectCraft mezzanine → {}", job.id, out.display())));
-            run_command(&args, stop)?;
+            h.lock(|s| {
+                s.push_log(format!("{}: rendering EffectCraft mezzanine → {}", job.id, out.display()));
+                if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == job.id) {
+                    j.progress.stage = "Rendering comp".into();
+                    j.progress.percent = 0.0;
+                }
+            });
+            let hid = job.id.clone();
+            let handle = h.clone();
+            run_command(&args, stop, |line| {
+                handle.lock(|s| {
+                    if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
+                        if let Some(pct) = parse_render_progress(line) {
+                            j.progress.stage = "Rendering comp".into();
+                            j.progress.percent = (pct * render_weight).clamp(0.0, render_weight * 99.0);
+                            let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
+                            if j.progress.percent > 2.0 && elapsed > 0.4 {
+                                let total = elapsed / (j.progress.percent as f64 / 100.0);
+                                j.progress.eta_sec = Some((total - elapsed).max(0.0));
+                            }
+                        }
+                        const MAX: usize = 24_576;
+                        if j.log.len() > MAX {
+                            j.log = j.log[j.log.len() - 12_288..].to_string();
+                        }
+                        j.log.push_str(line);
+                        j.log.push('\n');
+                    }
+                });
+                handle.note_change();
+                handle.emit_ui(crate::UiEvent::Changed);
+            })?;
             if !out.exists() {
                 return Err(crate::EngineError::Message(format!("effectcraft-cli did not write {}", out.display())));
             }
+            h.lock(|s| {
+                if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == job.id) {
+                    j.progress.stage = "Encoding".into();
+                    j.progress.percent = render_weight * 100.0;
+                }
+            });
             Ok(out)
         }
     }
 }
 
-fn run_command(args: &[String], stop: &EncodeStop) -> Result<(), crate::EngineError> {
+fn run_command(args: &[String], stop: &EncodeStop, mut on_line: impl FnMut(&str)) -> Result<(), crate::EngineError> {
     let (prog, rest) = args.split_first().ok_or_else(|| crate::EngineError::Message("empty command".into()))?;
-    let mut child = Command::new(prog).args(rest).stdin(std::process::Stdio::null()).spawn()?;
+    let mut child = hidden_command(prog).args(rest).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(out) = stdout {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    if let Some(err) = stderr {
+        thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     loop {
         if stop.is_requested() {
             let _ = child.kill();
             return Err(crate::EngineError::Message("stopped".into()));
         }
-        match child.try_wait()? {
-            Some(st) if st.success() => return Ok(()),
-            Some(st) => return Err(crate::EngineError::Message(format!("effectcraft-cli exited {}", st.code().unwrap_or(-1)))),
-            None => thread::sleep(Duration::from_millis(150)),
+        while let Ok(line) = rx.try_recv() {
+            on_line(&line);
         }
+        match child.try_wait()? {
+            Some(st) if st.success() => {
+                while let Ok(line) = rx.try_recv() {
+                    on_line(&line);
+                }
+                return Ok(());
+            }
+            Some(st) => return Err(crate::EngineError::Message(format!("effectcraft-cli exited {}", st.code().unwrap_or(-1)))),
+            None => thread::sleep(Duration::from_millis(80)),
+        }
+    }
+}
+
+/// Parse EffectCraft / FFmpeg-style render progress into 0..=100.
+pub(crate) fn parse_render_progress(line: &str) -> Option<f32> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("progress=") {
+        let v: f32 = rest.trim().parse().ok()?;
+        return Some(if v <= 1.0 { v * 100.0 } else { v.clamp(0.0, 100.0) });
+    }
+    if let Some(rest) = line.strip_prefix("percent=") {
+        return rest.trim().parse::<f32>().ok().map(|v| v.clamp(0.0, 100.0));
+    }
+    let lower = line.to_ascii_lowercase();
+    if let Some(idx) = lower.find(" of ") {
+        let before = line[..idx].rsplit(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?;
+        let after = line[idx + 4..].split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?;
+        let n: f32 = before.parse().ok()?;
+        let m: f32 = after.parse().ok()?;
+        if m > 0.0 {
+            return Some((n / m * 100.0).clamp(0.0, 100.0));
+        }
+    }
+    if let Some(i) = line.find("frame=") {
+        let rest = line[i + 6..].trim();
+        let n: f32 = rest.split_whitespace().next()?.parse().ok()?;
+        if let Some(t) = lower.find("total=") {
+            let m: f32 = line[t + 6..].split(|c: char| !c.is_ascii_digit() && c != '.').find(|s| !s.is_empty())?.parse().ok()?;
+            if m > 0.0 {
+                return Some((n / m * 100.0).clamp(0.0, 100.0));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_progress_parses_common_lines() {
+        assert_eq!(parse_render_progress("progress=0.4"), Some(40.0));
+        assert_eq!(parse_render_progress("percent=12.5"), Some(12.5));
+        assert_eq!(parse_render_progress("Rendering frame 25 of 250"), Some(10.0));
+        assert!(parse_render_progress("hello").is_none());
     }
 }

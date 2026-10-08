@@ -250,6 +250,20 @@ impl JobSource {
 
     pub fn display_name(&self) -> String {
         match self {
+            JobSource::File { .. } => self.comp_name(),
+            JobSource::EffectCraft { project, comp, .. } => {
+                let proj = project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| project.to_string_lossy().into_owned());
+                match comp.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                    Some(c) => format!("{proj} / {c}"),
+                    None => proj,
+                }
+            }
+        }
+    }
+
+    /// Stem used for the output file: composition name, or the dropped file's base name.
+    pub fn comp_name(&self) -> String {
+        match self {
             JobSource::File { path, sequence_start } => {
                 let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned());
                 if sequence_start.is_some() {
@@ -258,12 +272,19 @@ impl JobSource {
                     stem
                 }
             }
-            JobSource::EffectCraft { project, comp, .. } => {
-                let proj = project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| project.to_string_lossy().into_owned());
-                match comp {
-                    Some(c) => format!("{proj} / {c}"),
-                    None => proj,
-                }
+            JobSource::EffectCraft { project, comp, .. } => match comp.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                Some(c) => c.to_string(),
+                None => project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| project.to_string_lossy().into_owned()),
+            },
+        }
+    }
+
+    /// EffectCraft project stem; empty for dropped media.
+    pub fn project_name(&self) -> String {
+        match self {
+            JobSource::File { .. } => String::new(),
+            JobSource::EffectCraft { project, .. } => {
+                project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| project.to_string_lossy().into_owned())
             }
         }
     }
@@ -450,6 +471,8 @@ pub struct EnqueueReply {
     pub ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// JSON-lines / HTTP control envelope (mirrors EffectCraft's `{id, method, params}`).

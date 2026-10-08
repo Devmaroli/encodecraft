@@ -89,7 +89,7 @@ pub fn h264_unencodable_message(preset: &ExportPreset, width: u32, height: u32) 
 }
 
 fn two_pass_h264(p: &ExportPreset) -> bool {
-    p.format == OutputFormat::H264Mp4 && p.video.quality.is_two_pass()
+    p.format == OutputFormat::H264Mp4 && p.video.quality.is_two_pass() && !p.video.use_nvenc
 }
 
 fn passlogfile_prefix(output: &Path) -> PathBuf {
@@ -284,6 +284,10 @@ fn jpeg_q(quality_1_100: u8) -> u8 {
 }
 
 fn h264(args: &mut Vec<String>, p: &ExportPreset, vf: &[String], w: u32, h: u32, pass: Option<u8>, passlogfile: Option<&Path>) {
+    if p.video.use_nvenc {
+        nvenc(args, p, vf, w, h);
+        return;
+    }
     args.extend(["-c:v".into(), "libx264".into()]);
     if let Some(profile) = p.video.h264_profile.as_deref().filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto")) {
         args.extend(["-profile:v".into(), profile.to_string()]);
@@ -314,6 +318,39 @@ fn h264(args: &mut Vec<String>, p: &ExportPreset, vf: &[String], w: u32, h: u32,
         args.extend(["-pass".into(), n.to_string()]);
         if let Some(log) = passlogfile {
             args.extend(["-passlogfile".into(), argv_path(log)]);
+        }
+    }
+    push_vf(args, vf);
+}
+
+fn nvenc(args: &mut Vec<String>, p: &ExportPreset, vf: &[String], w: u32, h: u32) {
+    args.extend(["-c:v".into(), "h264_nvenc".into()]);
+    if let Some(profile) = p.video.h264_profile.as_deref().filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto")) {
+        args.extend(["-profile:v".into(), profile.to_string()]);
+    }
+    let level = match p.video.h264_level.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() && !s.eq_ignore_ascii_case("auto") => Some(s.to_string()),
+        _ => h264_level_for_frame(w, h).ok().flatten().map(str::to_string),
+    };
+    if let Some(level) = level {
+        args.extend(["-level:v".into(), level]);
+    }
+    args.extend(["-preset".into(), "p4".into(), "-rc".into(), "vbr".into(), "-pix_fmt".into(), "yuv420p".into()]);
+    if p.video.quality.is_two_pass() {
+        args.extend(["-multipass".into(), "fullres".into()]);
+    }
+    match p.video.quality {
+        Quality::Crf { value } => args.extend(["-cq".into(), value.to_string(), "-b:v".into(), "0".into()]),
+        Quality::Bitrate { kbps } => args.extend(["-b:v".into(), format!("{kbps}k")]),
+        Quality::Quality { value } => args.extend(["-cq".into(), ((100 - value as u16) * 28 / 100).min(28).to_string(), "-b:v".into(), "0".into()]),
+        Quality::Vbr2Pass { .. } => args.extend(vbr_rate_args(p.video.quality, false)),
+    }
+    if let Some(g) = p.video.keyframe_interval.filter(|n| *n > 0) {
+        args.extend(["-g".into(), g.to_string()]);
+    }
+    if let FrameRate::Custom(fps) = p.video.frame_rate {
+        if fps > 0.0 {
+            args.extend(["-r".into(), format!("{fps}"), "-fps_mode".into(), "cfr".into()]);
         }
     }
     push_vf(args, vf);
@@ -743,6 +780,31 @@ mod tests {
         assert!(s.contains("-an"), "{s}");
         assert!(!s.contains("-pass "), "{s}");
         assert!(!s.contains("pad=1920:1080"), "{s}");
+    }
+
+    #[test]
+    fn nvenc_uses_h264_nvenc_single_pass() {
+        let lib = PresetLibrary::new();
+        let mut p = lib.get("system.better-res").unwrap();
+        p.video.use_nvenc = true;
+        p.video.width = Some(1920);
+        p.video.height = Some(1080);
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+        });
+        assert_eq!(plans.len(), 1);
+        let s = plans[0].args.join(" ");
+        assert!(s.contains("h264_nvenc"), "{s}");
+        assert!(s.contains("-b:v 6200k"), "{s}");
+        assert!(s.contains("-minrate 2000k"), "{s}");
+        assert!(s.contains("-multipass fullres"), "{s}");
+        assert!(!s.contains("-pass "), "{s}");
+        assert!(!s.contains("libx264"), "{s}");
     }
 
     #[test]

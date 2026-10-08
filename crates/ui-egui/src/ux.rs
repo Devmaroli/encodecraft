@@ -20,7 +20,23 @@ pub struct UndoToast {
     pub message: String,
     pub snapshot: Vec<(String, ExportPreset, bool, Option<PresetReason>)>,
     pub order: Option<Vec<String>>,
+    pub removed: Vec<Job>,
     pub until: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarqueeState {
+    pub start: Pos2,
+    pub current: Pos2,
+    pub add: bool,
+    pub toggle: bool,
+    pub base: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemovePrompt {
+    pub encoding: Vec<String>,
+    pub rest: Vec<String>,
 }
 
 /// Queue row / source-group drag payload (distinct from preset-id `String` drops).
@@ -60,6 +76,28 @@ impl EncodeApp {
                 ui.label(RichText::new("Renders top to bottom · drag rows to change the order").color(t.text_faint).italics().size(12.0));
             });
         });
+        ui.horizontal(|ui| {
+            let nsel = self.selected_ids.len();
+            if nsel > 0 && ui.button(format!("Remove selected ({nsel})")).clicked() {
+                self.request_remove_selected(&jobs);
+            }
+            if jobs.iter().any(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped))
+                && ui.button("Clear finished").clicked()
+            {
+                let before = jobs.iter().cloned().collect::<Vec<_>>();
+                let removed: Vec<Job> = before.iter().filter(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped)).cloned().collect();
+                let order = before.iter().map(|j| j.id.clone()).collect::<Vec<_>>();
+                self.handle.lock(|s| s.queue.remove_finished());
+                self.toast = Some(UndoToast {
+                    message: format!("{} finished cleared · Undo", removed.len()),
+                    snapshot: Vec::new(),
+                    order: Some(order),
+                    removed,
+                    until: Instant::now() + Duration::from_secs(8),
+                });
+                self.handle.mark_dirty();
+            }
+        });
         ui.add_space(2.0);
         header_row(ui, &t);
         if jobs.is_empty() {
@@ -96,7 +134,7 @@ impl EncodeApp {
             }
         }
         const ROW_H: f32 = 36.0;
-        egui::ScrollArea::vertical().id_salt("queue-scroll").show_rows(ui, ROW_H, flat.len(), |ui, range| {
+        let scroll = egui::ScrollArea::vertical().id_salt("queue-scroll").show_rows(ui, ROW_H, flat.len(), |ui, range| {
             for i in range {
                 match flat[i] {
                     FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
@@ -104,11 +142,148 @@ impl EncodeApp {
                 }
             }
         });
+        self.update_marquee(ui, &geoms, &order, scroll.inner_rect);
+        self.paint_marquee(ui);
         self.draw_toast(ui);
         self.paint_queue_drag_layer(ui, &jobs, &geoms);
         self.preset_popup(ui, &jobs);
         self.format_popup(ui, &jobs);
+        self.remove_prompt_ui(ui, &jobs);
+        self.queue_footer(ui, &jobs);
         self.jobs_cache = jobs;
+    }
+
+    fn queue_footer(&mut self, ui: &mut Ui, _jobs: &[Job]) {
+        let n = self.selected_ids.len();
+        if n == 0 {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let t = self.t();
+            ui.label(RichText::new(format!("{n} selected")).color(t.accent).size(12.0));
+            if ui.small_button("✕").on_hover_text("Clear selection").clicked() {
+                self.selected_ids.clear();
+            }
+        });
+    }
+
+    fn update_marquee(&mut self, ui: &mut Ui, geoms: &[QueueGeom], _order: &[String], scroll_rect: Rect) {
+        if let Some(pos) = ui.ctx().pointer_interact_pos().or_else(|| ui.input(|i| i.pointer.hover_pos())) {
+            if let Some(m) = &mut self.marquee {
+                m.current = pos;
+                if pos.y < scroll_rect.top() + 22.0 {
+                    ui.scroll_with_delta(Vec2::new(0.0, 36.0));
+                } else if pos.y > scroll_rect.bottom() - 22.0 {
+                    ui.scroll_with_delta(Vec2::new(0.0, -36.0));
+                }
+            }
+        }
+        if let Some(m) = self.marquee.clone() {
+            let rect = Rect::from_two_pos(m.start, m.current);
+            let items: Vec<(String, Rect)> = geoms.iter().filter_map(|g| g.job_id.clone().map(|id| (id, g.rect))).collect();
+            let hits = crate::select::ids_touching_marquee(&items, rect);
+            let mode = if m.toggle {
+                crate::select::MarqueeMode::Toggle
+            } else if m.add {
+                crate::select::MarqueeMode::Add
+            } else {
+                crate::select::MarqueeMode::Replace
+            };
+            self.selected_ids = crate::select::marquee_result(&hits, mode, &m.base);
+        }
+        if ui.input(|i| i.pointer.any_released()) {
+            self.marquee = None;
+        }
+        if self.marquee.is_none() && ui.input(|i| i.pointer.primary_pressed()) {
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                let on_row = geoms.iter().any(|g| g.rect.contains(pos));
+                if !on_row && scroll_rect.contains(pos) {
+                    let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+                    self.marquee = Some(MarqueeState {
+                        start: pos,
+                        current: pos,
+                        add: mods.1,
+                        toggle: mods.0,
+                        base: self.selected_ids.clone(),
+                    });
+                    if !mods.0 && !mods.1 {
+                        self.selected_ids.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn paint_marquee(&self, ui: &mut Ui) {
+        let Some(m) = &self.marquee else {
+            return;
+        };
+        let rect = Rect::from_two_pos(m.start, m.current);
+        if rect.width() < 2.0 && rect.height() < 2.0 {
+            return;
+        }
+        let t = self.t();
+        let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, Id::new("queue-marquee")));
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 55));
+        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0_f32, t.accent), StrokeKind::Inside);
+    }
+
+    pub(crate) fn request_remove_selected(&mut self, jobs: &[Job]) {
+        let ids = self.selected_ids.clone();
+        if ids.is_empty() {
+            return;
+        }
+        let (encoding, rest) = crate::select::split_encoding(jobs, &ids);
+        if encoding.is_empty() {
+            self.commit_remove(&ids, jobs);
+        } else {
+            self.remove_prompt = Some(RemovePrompt { encoding, rest });
+        }
+    }
+
+    fn commit_remove(&mut self, ids: &[String], jobs: &[Job]) {
+        let order = jobs.iter().map(|j| j.id.clone()).collect::<Vec<_>>();
+        let removed = self.handle.stop_and_remove(ids);
+        let n = removed.len();
+        if n == 0 {
+            return;
+        }
+        self.selected_ids.retain(|id| !ids.contains(id));
+        self.toast = Some(UndoToast {
+            message: format!("{n} job{} removed · Undo", if n == 1 { "" } else { "s" }),
+            snapshot: Vec::new(),
+            order: Some(order),
+            removed,
+            until: Instant::now() + Duration::from_secs(8),
+        });
+        self.handle.mark_dirty();
+    }
+
+    fn remove_prompt_ui(&mut self, ui: &mut Ui, jobs: &[Job]) {
+        let Some(p) = self.remove_prompt.clone() else {
+            return;
+        };
+        egui::Window::new("Stop and remove?").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ui.ctx(), |ui| {
+            ui.label(format!("{} are encoding — Stop and remove / Skip them", p.encoding.len()));
+            ui.horizontal(|ui| {
+                if ui.button("Stop and remove").clicked() {
+                    let mut all = p.encoding.clone();
+                    all.extend(p.rest.clone());
+                    self.commit_remove(&all, jobs);
+                    self.remove_prompt = None;
+                }
+                if ui.button("Skip them").clicked() {
+                    if !p.rest.is_empty() {
+                        self.commit_remove(&p.rest, jobs);
+                    }
+                    self.remove_prompt = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.remove_prompt = None;
+                }
+            });
+        });
     }
 
     fn source_row(&mut self, ui: &mut Ui, g: &SourceGroup, jobs: &[Job], _order: &[String], geoms: &mut Vec<QueueGeom>) {
@@ -203,7 +378,7 @@ impl EncodeApp {
         let src_key = job.source.group_key();
         let bg = if selected { t.row_selected } else { t.row };
         let w = ui.available_width();
-        let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
+        let sense = Sense::click_and_drag();
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), sense);
         geoms.push(QueueGeom {
             rect,
@@ -236,10 +411,20 @@ impl EncodeApp {
             let name = job.source.display_name();
             let label = name.rsplit(" / ").next().unwrap_or(&name).to_string();
             let drag = QueueDrag { ids, source_key: src_key.clone(), is_source: false, label };
-            if resp.dragged() {
+            let on_name = resp.interact_pointer_pos().is_some_and(|p| col_layout(rect).src.contains(p));
+            if resp.drag_started() && !on_name {
+                let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+                self.marquee = Some(MarqueeState {
+                    start: resp.interact_pointer_pos().unwrap_or(rect.center()),
+                    current: resp.interact_pointer_pos().unwrap_or(rect.center()),
+                    add: mods.1,
+                    toggle: mods.0,
+                    base: self.selected_ids.clone(),
+                });
+            } else if on_name && resp.dragged() && self.marquee.is_none() {
                 egui::DragAndDrop::set_payload(ui.ctx(), drag);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-            } else if resp.hovered() {
+            } else if resp.hovered() && on_name {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
             }
         } else {
@@ -334,6 +519,12 @@ impl EncodeApp {
                 ui.add(egui::Spinner::new().size(11.0));
             }
             ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
+            if job.status == JobStatus::Encoding && !job.progress.stage.is_empty() {
+                ui.label(RichText::new(&job.progress.stage).size(10.0).color(t.text_dim));
+            }
+            if let Some(enc) = job.encoder_used.as_deref() {
+                ui.label(RichText::new(enc).size(10.0).color(if enc == "GPU" { t.cache_green } else { t.text_dim }));
+            }
             if let Some(kbps) = job.measured_bitrate_kbps {
                 let mbps = kbps / 1000.0;
                 let min_k = job.preset.video.quality.effective_min_kbps().map(|k| k as f32);
@@ -358,11 +549,16 @@ impl EncodeApp {
     }
 
     fn row_context_menu(&mut self, ui: &mut Ui, job_id: &str, all: &[Job]) {
+        if !self.selected_ids.iter().any(|id| id == job_id) {
+            self.selected_ids = vec![job_id.to_string()];
+        }
+        let targets = if self.selected_ids.len() > 1 { self.selected_ids.clone() } else { vec![job_id.to_string()] };
+        let n = targets.len();
         let presets = self.handle.lock(|s| s.presets.all());
-        ui.menu_button("Apply preset", |ui| {
+        ui.menu_button(if n > 1 { format!("Change preset for selected ({n})") } else { "Apply preset".into() }, |ui| {
             for p in &presets {
                 if ui.button(&p.name).clicked() {
-                    self.apply_preset_ids(&[job_id.to_string()], &p.id);
+                    self.apply_preset_ids(&targets, &p.id);
                     ui.close();
                 }
             }
@@ -389,19 +585,6 @@ impl EncodeApp {
             }
             ui.close();
         }
-        if ui.button("Show in Explorer").clicked() {
-            let path = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == job_id).map(|j| j.output.clone()));
-            if let Some(p) = path {
-                self.reveal_in_explorer(&p);
-            }
-            ui.close();
-        }
-        if ui.button("Duplicate").clicked() {
-            if let Ok(n) = self.handle.lock(|s| s.queue.duplicate(job_id)) {
-                self.handle.lock(|s| s.selected = Some(n));
-            }
-            ui.close();
-        }
         if ui.button("Add output to this source").clicked() {
             let pid = self.browser_selected.clone().unwrap_or_else(|| self.handle.lock(|s| s.settings.default_preset_id.clone()));
             let _ = self.handle.lock(|s| s.add_output_with_preset(job_id, &pid));
@@ -412,8 +595,31 @@ impl EncodeApp {
             self.handle.mark_dirty();
             ui.close();
         }
-        if ui.button("Remove").clicked() {
-            let _ = self.handle.lock(|s| s.queue.remove(job_id));
+        if ui.button(if n > 1 { format!("Remove selected ({n})") } else { "Remove".into() }).clicked() {
+            self.request_remove_selected(all);
+            ui.close();
+        }
+        if ui.button("Remove finished").clicked() {
+            self.handle.lock(|s| s.queue.remove_finished());
+            self.handle.mark_dirty();
+            ui.close();
+        }
+        if ui.button("Re-queue / reset status").clicked() {
+            self.handle.lock(|s| s.queue.reset_status(&targets));
+            self.handle.mark_dirty();
+            ui.close();
+        }
+        if ui.button("Duplicate").clicked() {
+            for id in &targets {
+                let _ = self.handle.lock(|s| s.queue.duplicate(id));
+            }
+            ui.close();
+        }
+        if ui.button("Reveal output").clicked() {
+            let path = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == job_id).map(|j| j.output.clone()));
+            if let Some(p) = path {
+                self.reveal_in_explorer(&p);
+            }
             ui.close();
         }
         let _ = all;
@@ -449,6 +655,7 @@ impl EncodeApp {
                     message: format!("{name} applied to {n} output{} — tags now say Manual", if n == 1 { "" } else { "s" }),
                     snapshot: snap,
                     order: None,
+                    removed: Vec::new(),
                     until: Instant::now() + Duration::from_secs(8),
                 });
                 self.handle.mark_dirty();
@@ -466,7 +673,7 @@ impl EncodeApp {
             self.toast = None;
             return;
         }
-        let can_undo = !toast.snapshot.is_empty() || toast.order.is_some();
+        let can_undo = !toast.snapshot.is_empty() || toast.order.is_some() || !toast.removed.is_empty();
         let fill = if can_undo { Color32::from_rgb(0x2a, 0x5a, 0x38) } else { Color32::from_rgb(0x3a, 0x38, 0x28) };
         let fg = if can_undo { Color32::from_rgb(0xd8, 0xf0, 0xdc) } else { Color32::from_rgb(0xf0, 0xe8, 0xd0) };
         let prefix = if can_undo { "✓  " } else { "" };
@@ -480,11 +687,12 @@ impl EncodeApp {
         });
     }
 
-    fn show_info_toast(&mut self, message: impl Into<String>) {
+    pub(crate) fn show_info_toast(&mut self, message: impl Into<String>) {
         self.toast = Some(UndoToast {
             message: message.into(),
             snapshot: Vec::new(),
             order: None,
+            removed: Vec::new(),
             until: Instant::now() + Duration::from_secs(6),
         });
     }
@@ -502,7 +710,11 @@ impl EncodeApp {
 
     pub fn undo_toast(&mut self) {
         if let Some(t) = self.toast.take() {
-            if let Some(order) = t.order {
+            if !t.removed.is_empty() {
+                let order = t.order.clone();
+                self.handle.lock(|s| s.queue.insert_jobs(t.removed, order.as_deref()));
+                self.status = "Undid remove".into();
+            } else if let Some(order) = t.order {
                 self.handle.lock(|s| s.queue.restore_order(&order));
                 self.status = "Undid move".into();
             } else {
@@ -528,6 +740,7 @@ impl EncodeApp {
                     },
                     snapshot: Vec::new(),
                     order: Some(before),
+                    removed: Vec::new(),
                     until: Instant::now() + Duration::from_secs(8),
                 });
                 self.handle.mark_dirty();
@@ -1020,6 +1233,9 @@ impl EncodeApp {
                 }
                 ui.separator();
                 ui.label(RichText::new("AUDIO").small().strong());
+                if p.format == OutputFormat::H264Mp4 {
+                    ui.checkbox(&mut p.video.allow_gpu, "Allow NVIDIA NVENC (needs toolbar GPU encode on)");
+                }
                 ui.checkbox(&mut p.audio.enabled, "Include audio");
                 if p.audio.enabled {
                     ui.add(egui::DragValue::new(&mut p.audio.bitrate_kbps).range(32..=512).prefix("kbps "));
@@ -1335,7 +1551,7 @@ struct Cols {
 
 fn col_layout(rect: Rect) -> Cols {
     let w = rect.width();
-    let status_w = 64.0;
+    let status_w = 132.0;
     let fmt_w = 78.0;
     let preset_w = (w * 0.28).clamp(180.0, 300.0);
     let out_w = (w * 0.28).clamp(160.0, 360.0);
@@ -1526,6 +1742,7 @@ fn spawn_reveal(plan: &RevealPlan) -> Result<(), String> {
 }
 
 fn spawn_detached(mut cmd: Command) -> Result<(), String> {
+    encodecraft_ffmpeg::hide_window(&mut cmd);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
@@ -1533,14 +1750,14 @@ fn spawn_detached(mut cmd: Command) -> Result<(), String> {
 #[cfg(windows)]
 fn spawn_select_file(path: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new("explorer.exe");
+    let mut cmd = encodecraft_ffmpeg::hidden_command("explorer.exe");
     cmd.raw_arg(format!(r#"/select,"{}""#, path.display()));
     spawn_detached(cmd)
 }
 
 #[cfg(windows)]
 fn spawn_open_dir(path: &Path) -> Result<(), String> {
-    let mut cmd = Command::new("explorer.exe");
+    let mut cmd = encodecraft_ffmpeg::hidden_command("explorer.exe");
     cmd.arg(path);
     spawn_detached(cmd)
 }
@@ -1548,7 +1765,7 @@ fn spawn_open_dir(path: &Path) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn spawn_select_file(path: &Path) -> Result<(), String> {
     spawn_detached({
-        let mut cmd = Command::new("open");
+        let mut cmd = encodecraft_ffmpeg::hidden_command("open");
         cmd.arg("-R").arg(path);
         cmd
     })
@@ -1557,7 +1774,7 @@ fn spawn_select_file(path: &Path) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn spawn_open_dir(path: &Path) -> Result<(), String> {
     spawn_detached({
-        let mut cmd = Command::new("open");
+        let mut cmd = encodecraft_ffmpeg::hidden_command("open");
         cmd.arg(path);
         cmd
     })
@@ -1572,7 +1789,7 @@ fn spawn_select_file(path: &Path) -> Result<(), String> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_open_dir(path: &Path) -> Result<(), String> {
     spawn_detached({
-        let mut cmd = Command::new("xdg-open");
+        let mut cmd = encodecraft_ffmpeg::hidden_command("xdg-open");
         cmd.arg(path);
         cmd
     })

@@ -10,8 +10,8 @@ use encodecraft_ffmpeg::EncodeProgress;
 use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize, Trim};
 use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_presets::{
-    apply_template, constrain_output_dir, default_template, infer_screen_from_text, output_path, unique_output_path, ExportPreset, NamingContext,
-    PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
+    apply_template, constrain_output_dir, default_template, infer_screen_from_text, naming_uses_size, output_path, unique_output_path, ExportPreset,
+    NamingContext, PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +106,9 @@ pub struct Job {
     /// ffprobe average video bitrate of the finished file (kbps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_bitrate_kbps: Option<f32>,
+    /// `CPU` or `GPU` after the job starts encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_used: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -120,6 +123,9 @@ pub struct ProgressSnap {
     pub out_time_sec: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<f32>,
+    /// `Rendering comp`, `Encoding pass 1/2`, …
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stage: String,
 }
 
 impl From<&EncodeProgress> for ProgressSnap {
@@ -132,6 +138,7 @@ impl From<&EncodeProgress> for ProgressSnap {
             frame: p.frame,
             out_time_sec: p.out_time_sec,
             bitrate_kbps: p.bitrate_kbps,
+            stage: p.stage.clone(),
         }
     }
 }
@@ -163,9 +170,13 @@ impl Job {
             return false;
         }
         let dir = self.output.parent().map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+        if !naming_uses_size(if self.naming.is_empty() { default_template() } else { self.naming.as_str() }) {
+            self.size_name_pending = false;
+            return false;
+        }
         let naming = if self.naming.is_empty() { default_template() } else { self.naming.as_str() };
-        let ctx = NamingContext::from_preset(
-            &self.source.display_name(),
+        let ctx = NamingContext::from_source(
+            &self.source,
             &self.preset,
             w,
             h,
@@ -275,6 +286,41 @@ impl EncodeQueue {
         self.jobs.retain(|j| !matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped));
     }
 
+    /// Take jobs out of the queue (caller stops encoding jobs first). Restores via [`Self::insert_jobs`].
+    pub fn take_jobs(&mut self, ids: &[String]) -> Vec<Job> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.jobs.len() {
+            if ids.iter().any(|id| id == &self.jobs[i].id) {
+                out.push(self.jobs.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    pub fn insert_jobs(&mut self, jobs: Vec<Job>, order: Option<&[String]>) {
+        self.jobs.extend(jobs);
+        if let Some(order) = order {
+            let _ = self.restore_order(order);
+        }
+    }
+
+    pub fn reset_status(&mut self, ids: &[String]) {
+        for id in ids {
+            if let Some(j) = self.jobs.iter_mut().find(|j| j.id == *id) {
+                if matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped | JobStatus::Paused) {
+                    j.status = JobStatus::Waiting;
+                    j.progress = ProgressSnap::default();
+                    j.error = None;
+                    j.finished_ms = None;
+                    j.started_ms = None;
+                }
+            }
+        }
+    }
+
     pub fn duplicate(&mut self, id: &str) -> Result<String, QueueError> {
         let i = self.index_of(id).ok_or_else(|| QueueError::Message(format!("no job {id}")))?;
         let mut copy = self.jobs[i].clone();
@@ -286,6 +332,8 @@ impl EncodeQueue {
         copy.started_ms = None;
         copy.finished_ms = None;
         copy.created_ms = unix_ms();
+        copy.encoder_used = None;
+        copy.measured_bitrate_kbps = None;
         let new_id_s = copy.id.clone();
         self.jobs.insert(i + 1, copy);
         Ok(new_id_s)
@@ -311,8 +359,8 @@ impl EncodeQueue {
         copy.started_ms = None;
         copy.finished_ms = None;
         copy.created_ms = unix_ms();
-        let ctx = NamingContext::from_preset(
-            &copy.source.display_name(),
+        let ctx = NamingContext::from_source(
+            &copy.source,
             &copy.preset,
             w.unwrap_or(0),
             h.unwrap_or(0),
@@ -445,7 +493,15 @@ impl EncodeQueue {
         for (n, screen) in sizes.into_iter().enumerate() {
             let mut screen = screen;
             if screen.is_none() {
-                screen = infer_screen_from_text(&source_hint, &lib.screen_rules);
+                screen = infer_screen_from_text(&source_hint, &lib.screen_rules).map(|mut s| {
+                    s.name = req.source.comp_name();
+                    s
+                });
+            } else if let Some(s) = screen.as_mut() {
+                let n = s.name.trim();
+                if n.is_empty() || n.contains('/') || n.contains(".ecproj") {
+                    s.name = req.source.comp_name();
+                }
             }
             let mut pr = preset.clone();
             let mut preset_reason = None;
@@ -499,8 +555,8 @@ impl EncodeQueue {
             let h = pr.video.height.unwrap_or(0);
             let encode_warning = h264_unencodable_message(&pr, w, h);
             let id = new_id("job");
-            let ctx = NamingContext::from_preset(
-                &req.source.display_name(),
+            let ctx = NamingContext::from_source(
+                &req.source,
                 &pr,
                 w,
                 h,
@@ -516,12 +572,12 @@ impl EncodeQueue {
                     let parent = base.parent().unwrap_or(std::path::Path::new("."));
                     let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
                     let ext = base.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-                    output = unique_output_path(parent.join(format!("{stem}-{n}{ext}")), false);
+                    output = unique_output_path(parent.join(format!("{stem} ({n}){ext}")), false);
                     n = n.saturating_add(1);
                 }
             }
             claimed.push(output.clone());
-            let size_name_pending = w == 0 || h == 0;
+            let size_name_pending = naming_uses_size(naming) && (w == 0 || h == 0);
             let metadata_pending = size_name_pending || matches!(req.source, JobSource::File { .. });
             jobs.push(Job {
                 id,
@@ -538,7 +594,7 @@ impl EncodeQueue {
                 size_name_pending,
                 metadata_pending,
                 duration_sec: None,
-                status: if req.start_queue { JobStatus::Waiting } else { JobStatus::Paused },
+                status: JobStatus::Waiting,
                 progress: ProgressSnap::default(),
                 log: String::new(),
                 error: None,
@@ -546,6 +602,7 @@ impl EncodeQueue {
                 started_ms: None,
                 finished_ms: None,
                 measured_bitrate_kbps: None,
+                encoder_used: None,
             });
         }
         Ok(jobs)
@@ -616,7 +673,7 @@ fn source_screen_hint(source: &JobSource) -> String {
 }
 
 pub fn preview_name(source: &JobSource, preset: &ExportPreset, w: u32, h: u32, template: &str) -> String {
-    let ctx = NamingContext::from_preset(&source.display_name(), preset, w, h, "preview", 1, "");
+    let ctx = NamingContext::from_source(source, preset, w, h, "preview", 1, "");
     apply_template(if template.is_empty() { default_template() } else { template }, &ctx)
 }
 
@@ -804,7 +861,7 @@ mod tests {
         assert_eq!(jobs[0].preset_reason, Some(PresetReason::StudioDefault));
         assert_eq!(jobs[0].preset.video.width, Some(1080));
         assert_eq!(jobs[0].preset.video.height, Some(1080));
-        assert_eq!(jobs[0].status, JobStatus::Paused);
+        assert_eq!(jobs[0].status, JobStatus::Waiting);
     }
 
     #[test]
@@ -930,20 +987,64 @@ mod tests {
     }
 
     #[test]
-    fn start_queue_false_holds_job_while_running() {
+    fn enqueue_without_start_leaves_jobs_waiting() {
         let lib = PresetLibrary::new();
         let mut q = EncodeQueue::new();
-        q.running = true;
         let mut req = req_many();
         req.start_queue = false;
         req.sizes = vec![];
-        q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
-        assert!(q.running);
-        assert_eq!(q.jobs[0].status, JobStatus::Paused);
-        assert!(q.next_waiting().is_none());
-        q.start();
+        q.enqueue(&req, &lib, std::path::Path::new("/out"), "{comp}", false, true).unwrap();
+        assert!(!q.running);
         assert_eq!(q.jobs[0].status, JobStatus::Waiting);
         assert!(q.next_waiting().is_some());
+    }
+
+    #[test]
+    fn effectcraft_default_name_is_exact_comp() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/Test.ecproj"),
+                comp: Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(6880),
+                height: Some(1032),
+            },
+            preset_id: "system.h264-mp4".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: true,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{comp}", false, true).unwrap();
+        let name = jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, "Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp.mp4");
+        assert!(!name.contains("Test"), "{name}");
+        assert!(!name.contains("6880x1032"), "{name}");
+        assert_eq!(jobs[0].status, JobStatus::Waiting);
+        assert_eq!(jobs[0].screen.as_ref().map(|s| s.name.as_str()), Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp"));
+    }
+
+    #[test]
+    fn take_and_restore_jobs_keeps_order() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        let mut req = req_many();
+        req.sizes = vec![];
+        q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        req.source = JobSource::file("/ads/b.mp4");
+        q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        let order = q.job_ids();
+        let taken = q.take_jobs(&[order[0].clone()]);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(q.jobs.len(), 1);
+        q.insert_jobs(taken, Some(&order));
+        assert_eq!(q.job_ids(), order);
     }
 
     fn honor_req() -> EnqueueRequest {

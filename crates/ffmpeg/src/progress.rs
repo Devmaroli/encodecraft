@@ -11,6 +11,8 @@ pub struct EncodeProgress {
     pub eta_sec: Option<f64>,
     /// Instantaneous video bitrate from `-progress`, in kbit/s.
     pub bitrate_kbps: Option<f32>,
+    /// Human stage label (`Encoding pass 1/2`). Empty = encode.
+    pub stage: String,
 }
 
 impl EncodeProgress {

@@ -1,6 +1,9 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
+
+#[cfg(test)]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -94,7 +97,12 @@ pub fn encode_with_stall(
     for (i, plan) in plans.iter().enumerate() {
         on_log(&plan.display_cmdline(&ff.ffmpeg));
         if n_passes > 1 {
+            progress.stage = format!("Encoding pass {}/{}", i + 1, n_passes);
             on_log(&format!("pass {}/{}", i + 1, n_passes));
+        } else if preset.video.use_nvenc {
+            progress.stage = "Encoding GPU".into();
+        } else {
+            progress.stage = "Encoding".into();
         }
         match run_one_plan(ff, plan, duration, stall_secs, stop, &mut progress, &mut log, &mut on_progress, &mut on_log, i, n_passes) {
             Ok(()) => {}
@@ -178,7 +186,9 @@ fn enforce_min_bitrate(
         media,
         sequence_start,
     });
-    inject_hrd_cbr(&mut plan.args);
+    if !floor.video.use_nvenc {
+        inject_hrd_cbr(&mut plan.args);
+    }
     on_log(&plan.display_cmdline(&ff.ffmpeg));
     let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));
     match run_one_plan(ff, &plan, duration, stall_secs, stop, progress, &mut extra, on_progress, on_log, 0, 1) {
@@ -214,7 +224,7 @@ fn run_one_plan(
     n_passes: usize,
 ) -> Result<(), FfmpegError> {
     let mut child = ChildGuard {
-        child: Some(Command::new(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
+        child: Some(super::proc::command(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 FfmpegError::Missing
             } else {
@@ -459,7 +469,7 @@ pub fn thumbnail_png(ff: &Ffmpeg, source: &Path, dest: &Path, at_sec: f64) -> Re
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut cmd = Command::new(&ff.ffmpeg);
+    let mut cmd = super::proc::command(&ff.ffmpeg);
     if at_sec > 0.05 {
         cmd.args(["-ss", &format!("{at_sec:.3}")]);
     }

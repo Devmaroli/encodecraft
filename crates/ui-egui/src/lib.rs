@@ -6,6 +6,7 @@ mod dock;
 mod encode_preview;
 mod panels;
 mod perf;
+mod select;
 mod theme;
 mod ux;
 
@@ -54,6 +55,11 @@ pub struct EncodeApp {
     pub(crate) popup_anchor: Option<Pos2>,
     pub(crate) preset_search: String,
     pub(crate) shift_anchor: Option<String>,
+    pub(crate) marquee: Option<ux::MarqueeState>,
+    pub(crate) remove_prompt: Option<ux::RemovePrompt>,
+    nvenc_available: bool,
+    last_seen_jobs: usize,
+    jobs_bootstrapped: bool,
     pub(crate) try_screen: String,
     pub(crate) try_result: Option<String>,
     pub(crate) rules_new_ultra: String,
@@ -131,6 +137,11 @@ impl EncodeApp {
             popup_anchor: None,
             preset_search: String::new(),
             shift_anchor: selected,
+            marquee: None,
+            remove_prompt: None,
+            nvenc_available: false,
+            last_seen_jobs: 0,
+            jobs_bootstrapped: false,
             try_screen: String::new(),
             try_result: None,
             rules_new_ultra: String::new(),
@@ -188,7 +199,7 @@ impl EncodeApp {
         if rev == self.snap_rev && !self.jobs_cache.is_empty() {
             return;
         }
-        let (jobs, running, ff) = self.handle.lock(|s| {
+        let (jobs, running, ff, nvenc) = self.handle.lock(|s| {
             (
                 s.queue.jobs.iter().map(Job::for_ui).collect::<Vec<_>>(),
                 s.queue.running,
@@ -196,12 +207,21 @@ impl EncodeApp {
                     Ok(f) => (true, f.ok_message()),
                     Err(e) => (false, e.to_string()),
                 },
+                s.ffmpeg.as_ref().ok().is_some_and(|f| f.nvenc),
             )
         });
+        let n = jobs.len();
+        if self.jobs_bootstrapped && n > self.last_seen_jobs && !running {
+            let added = n - self.last_seen_jobs;
+            self.show_info_toast(format!("{added} job{} added · Start", if added == 1 { "" } else { "s" }));
+        }
+        self.last_seen_jobs = n;
+        self.jobs_bootstrapped = true;
         self.jobs_cache = jobs;
         self.queue_running = running;
         self.ffmpeg_ok = ff.0;
         self.ffmpeg_msg = ff.1;
+        self.nvenc_available = nvenc;
         self.snap_rev = rev;
     }
 
@@ -259,6 +279,23 @@ impl eframe::App for EncodeApp {
         }
         if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)) {
             self.move_selected_rows(1);
+        }
+        let wants_text = ctx.wants_keyboard_input();
+        if !wants_text && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+            self.selected_ids = self.jobs_cache.iter().map(|j| j.id.clone()).collect();
+        }
+        if !wants_text && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.selected_ids.clear();
+            self.marquee = None;
+            self.remove_prompt = None;
+        }
+        if !wants_text && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            let jobs = self.jobs_cache.clone();
+            self.request_remove_selected(&jobs);
+        }
+        if !wants_text && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.handle.lock(|s| s.queue.start());
+            self.handle.note_change();
         }
         self.ingest_drops(ctx);
         self.drop_overlay(ctx);
@@ -515,6 +552,22 @@ impl EncodeApp {
                         self.handle.stop_all();
                     }
                     ui.separator();
+                    {
+                        let nvenc = self.nvenc_available;
+                        let mut gpu = self.handle.lock(|s| s.settings.gpu_encode);
+                        let label = if nvenc { "GPU encode" } else { "GPU encode (no NVIDIA)" };
+                        let r = ui.add_enabled(nvenc, egui::Checkbox::new(&mut gpu, label));
+                        if nvenc {
+                            r.on_hover_text("When on, H.264 presets that allow GPU use NVIDIA NVENC. Off forces CPU x264.");
+                        } else {
+                            r.on_hover_text("No NVIDIA NVENC encoder in this FFmpeg build.");
+                        }
+                        if nvenc && gpu != self.handle.lock(|s| s.settings.gpu_encode) {
+                            self.handle.lock(|s| s.settings.gpu_encode = gpu);
+                            self.handle.mark_dirty();
+                        }
+                    }
+                    ui.separator();
                     if ui.button("  + Add  ").clicked() {
                         self.pick_sources();
                     }
@@ -731,6 +784,14 @@ impl EncodeApp {
             }
             ui.end_row();
 
+            if job.preset.format == OutputFormat::H264Mp4 {
+                ui.label("GPU");
+                ui.checkbox(&mut job.preset.video.allow_gpu, "Allow NVIDIA NVENC for this preset");
+                ui.label(RichText::new("Needs the toolbar GPU encode switch on").small().color(t.text_dim));
+                ui.label("");
+                ui.end_row();
+            }
+
             ui.label("Audio");
             ui.checkbox(&mut job.preset.audio.enabled, "Include audio");
             ui.label("Audio kbps");
@@ -874,8 +935,8 @@ impl EncodeApp {
         });
         ui.horizontal(|ui| {
             ui.label("Naming");
-            ui.add(egui::TextEdit::singleline(&mut s.naming).desired_width(280.0).hint_text("{name}_{width}x{height}"));
-            ui.label(RichText::new("{name} {width} {height} {preset} {codec} {date} {screen}").small().color(self.t().text_faint));
+            ui.add(egui::TextEdit::singleline(&mut s.naming).desired_width(280.0).hint_text("{comp}"));
+            ui.label(RichText::new("{comp} {project} {name} {width} {height} {preset} {codec} {date} {screen}").small().color(self.t().text_faint));
         });
         ui.horizontal(|ui| {
             ui.label("Default preset");
@@ -895,7 +956,21 @@ impl EncodeApp {
             ui.add(egui::DragValue::new(&mut s.http_port).range(1024..=65535));
             ui.label(RichText::new("EffectCraft posts to 127.0.0.1:this").small());
         });
-        ui.checkbox(&mut s.auto_start_queue, "Start the queue when a job arrives from EffectCraft / the CLI");
+        if ui.checkbox(&mut s.auto_start_queue, "Start queue automatically when jobs arrive").changed() {
+            self.handle.lock(|sess| sess.settings.auto_start_queue = s.auto_start_queue);
+            self.handle.mark_dirty();
+        }
+        ui.label(RichText::new("Off (default): jobs land as Ready until you press Start queue.").small().color(self.t().text_dim));
+        {
+            let nvenc = self.nvenc_available;
+            let r = ui.add_enabled(nvenc, egui::Checkbox::new(&mut s.gpu_encode, "GPU encode (NVIDIA NVENC)"));
+            if nvenc {
+                r.on_hover_text("Master switch. Presets that allow GPU use NVENC when this is on.");
+            } else {
+                r.on_hover_text("No NVIDIA NVENC encoder in this FFmpeg build.");
+                s.gpu_encode = false;
+            }
+        }
         ui.add_space(8.0);
         ui.label(RichText::new("Encoding preview").strong());
         let mut preview = s.show_encode_preview;

@@ -20,7 +20,7 @@ pub use tasks::{IoCmd, UiEvent};
 pub use drops::{
     classify_dropped_paths, ecproj_comp_size, ecproj_comp_size_file, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop,
 };
-pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
+pub use ipc::{default_port, post_enqueue, post_start, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, layout_path, set_home};
 pub use demo::{seed_preset_ui_demo, seed_stress_queue};
 pub use persist::Settings;
@@ -193,6 +193,8 @@ impl Handle {
             };
             let _ = std::fs::create_dir_all(&dest);
             req.output_dir = Some(dest.clone());
+            let start = s.settings.auto_start_queue && req.start_queue;
+            req.start_queue = start;
             let ids = s.queue.enqueue(&req, &s.presets, &dest, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
             s.resolve_pending_output_names(&ids);
             Ok::<_, EngineError>(ids)
@@ -215,7 +217,14 @@ impl Handle {
                 let req: EnqueueRequest = serde_json::from_value(params.clone()).map_err(|e| EngineError::Message(e.to_string()))?;
                 req.validate().map_err(|e| EngineError::Message(e.to_string()))?;
                 let ids = self.enqueue(req)?;
-                Ok(json!({ "ids": ids }))
+                let running = self.lock(|s| s.queue.running);
+                let n = ids.len();
+                let message = if running {
+                    format!("{n} job{} added", if n == 1 { "" } else { "s" })
+                } else {
+                    format!("{n} job{} added · Start", if n == 1 { "" } else { "s" })
+                };
+                Ok(json!({ "ids": ids, "added": n, "running": running, "message": message }))
             }
             "queue.start" => {
                 self.lock(|s| s.queue.start());
@@ -292,6 +301,13 @@ impl Handle {
                 }
             }
         });
+    }
+
+    pub fn stop_and_remove(&self, ids: &[String]) -> Vec<encodecraft_queue::Job> {
+        for id in ids {
+            self.stop_job(id);
+        }
+        self.lock(|s| s.queue.take_jobs(ids))
     }
 
     pub fn stop_all(&self) {
@@ -837,6 +853,89 @@ mod tests {
             }
         });
         assert!(out.is_dir(), "Output folder is created at queue time");
+    }
+
+    #[test]
+    fn effectcraft_handoff_does_not_autostart() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        assert!(!h.lock(|s| s.settings.auto_start_queue));
+        let project = home.join("spot.ecproj");
+        std::fs::write(&project, br#"{"compositions":[{"name":"A"},{"name":"B"}]}"#).unwrap();
+        for name in ["A", "B"] {
+            let req = EnqueueRequest {
+                schema: 1,
+                source: JobSource::EffectCraft {
+                    project: project.clone(),
+                    comp: Some(name.into()),
+                    mezzanine: "prores".into(),
+                    work_area: false,
+                    width: Some(1920),
+                    height: Some(1080),
+                },
+                preset_id: "system.h264-mp4".into(),
+                preset_override: None,
+                output_dir: None,
+                naming: None,
+                sizes: vec![],
+                trim: None,
+                scale: None,
+                start_queue: true,
+            };
+            h.enqueue(req).unwrap();
+        }
+        h.lock(|s| {
+            assert!(!s.queue.running, "queue must stay idle");
+            assert_eq!(s.queue.jobs.len(), 2);
+            assert!(s.queue.jobs.iter().all(|j| j.status == JobStatus::Waiting));
+            let names: Vec<_> = s.queue.jobs.iter().map(|j| j.output.file_name().unwrap().to_string_lossy().into_owned()).collect();
+            assert!(names.iter().any(|n| n == "A.mp4"), "{names:?}");
+            assert!(names.iter().any(|n| n == "B.mp4"), "{names:?}");
+        });
+    }
+
+    #[test]
+    fn production_commands_go_through_hidden_helper() {
+        let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let roots = ["crates/ffmpeg/src", "crates/engine/src", "crates/ui-egui/src", "apps/encodecraft-cli/src"];
+        let mut bare = Vec::new();
+        for root in roots {
+            let root = ws.join(root);
+            if !root.is_dir() {
+                continue;
+            }
+            fn walk(dir: &std::path::Path, bare: &mut Vec<String>) {
+                let Ok(rd) = std::fs::read_dir(dir) else { return };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, bare);
+                        continue;
+                    }
+                    if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                        continue;
+                    }
+                    let Ok(src) = std::fs::read_to_string(&p) else { continue };
+                    let mut in_test = false;
+                    for (i, line) in src.lines().enumerate() {
+                        let t = line.trim();
+                        if t.starts_with("#[cfg(test)]") {
+                            in_test = true;
+                        }
+                        if in_test {
+                            continue;
+                        }
+                        if t.contains("Command::new") && !p.ends_with("proc.rs") {
+                            bare.push(format!("{}:{}: {t}", p.display(), i + 1));
+                        }
+                    }
+                }
+            }
+            walk(&root, &mut bare);
+        }
+        assert!(bare.is_empty(), "bare Command::new in production:\n{}", bare.join("\n"));
     }
 
     #[test]

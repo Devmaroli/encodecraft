@@ -134,16 +134,22 @@ impl EncodeApp {
             }
         }
         const ROW_H: f32 = 36.0;
-        let scroll = egui::ScrollArea::vertical().id_salt("queue-scroll").show_rows(ui, ROW_H, flat.len(), |ui, range| {
-            for i in range {
-                match flat[i] {
-                    FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
-                    FlatRow::Output(job) => self.output_row(ui, job, &order, &jobs, &mut geoms),
+        let toast_h = if self.toast.as_ref().is_some_and(|t| Instant::now() <= t.until) { 40.0 } else { 0.0 };
+        let footer_h = if self.selected_ids.is_empty() { 0.0 } else { 26.0 };
+        let scroll_h = (ui.available_height() - toast_h - footer_h).max(120.0);
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt("queue-scroll")
+            .max_height(scroll_h)
+            .show_rows(ui, ROW_H, flat.len(), |ui, range| {
+                for i in range {
+                    match flat[i] {
+                        FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
+                        FlatRow::Output(job) => self.output_row(ui, job, &order, &jobs, &mut geoms),
+                    }
                 }
-            }
-        });
+            });
         self.update_marquee(ui, &geoms, &order, scroll.inner_rect);
-        self.paint_marquee(ui);
+        self.paint_marquee(ui, scroll.inner_rect);
         self.draw_toast(ui);
         self.paint_queue_drag_layer(ui, &jobs, &geoms);
         self.preset_popup(ui, &jobs);
@@ -239,18 +245,21 @@ impl EncodeApp {
         }
     }
 
-    fn paint_marquee(&self, ui: &mut Ui) {
+    fn paint_marquee(&self, ui: &mut Ui, scroll_rect: Rect) {
         let Some(m) = &self.marquee else {
             return;
         };
         if !crate::select::marquee_is_drag(m.start, m.current) {
             return;
         }
-        let rect = Rect::from_two_pos(m.start, m.current);
+        let rect = Rect::from_two_pos(m.start, m.current).intersect(scroll_rect);
+        if rect.width() < 2.0 || rect.height() < 2.0 {
+            return;
+        }
         let t = self.t();
-        let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, Id::new("queue-marquee")));
-        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 90));
-        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.5_f32, t.accent), StrokeKind::Inside);
+        let painter = ui.ctx().layer_painter(LayerId::new(Order::Debug, Id::new("queue-marquee")));
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 120));
+        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(2.0_f32, t.accent), StrokeKind::Outside);
     }
 
     pub(crate) fn request_remove_selected(&mut self, jobs: &[Job]) {

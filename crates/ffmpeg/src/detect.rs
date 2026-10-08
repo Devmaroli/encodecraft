@@ -80,8 +80,133 @@ fn ffmpeg_from(ffmpeg: PathBuf) -> Result<Ffmpeg, FfmpegError> {
     Ok(Ffmpeg { ffmpeg, ffprobe, version })
 }
 
+/// Inputs for [`find_effectcraft_cli_with`] so tests can inject registry / PATH without HKCU.
+#[derive(Clone, Debug, Default)]
+pub struct EffectcraftLookup {
+    pub env: Option<PathBuf>,
+    pub current_exe: Option<PathBuf>,
+    pub registry_install_dir: Option<PathBuf>,
+    pub path_dirs: Vec<PathBuf>,
+    pub extra: Vec<PathBuf>,
+}
+
 pub fn find_effectcraft_cli() -> Result<PathBuf, FfmpegError> {
-    locate_tool("effectcraft-cli", EFFECTCRAFT_CLI_ENV, &effectcraft_candidates()).map_err(|_| FfmpegError::EffectCraftMissing)
+    let current_exe = std::env::current_exe().ok();
+    find_effectcraft_cli_with(&EffectcraftLookup {
+        env: std::env::var_os(EFFECTCRAFT_CLI_ENV).map(PathBuf::from),
+        registry_install_dir: effectcraft_registry_install_dir(),
+        extra: leftover_effectcraft_candidates(current_exe.as_deref()),
+        current_exe,
+        path_dirs: std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default(),
+    })
+}
+
+/// Search order: `EFFECTCRAFT_CLI`, next to this executable, HKCU InstallDir,
+/// sibling `..\effectcraft\effectcraft-cli`, then PATH (then leftover extras).
+pub fn find_effectcraft_cli_with(lookup: &EffectcraftLookup) -> Result<PathBuf, FfmpegError> {
+    for c in effectcraft_search_candidates(lookup) {
+        if c.is_absolute() && is_exe(&c) {
+            return Ok(c);
+        }
+    }
+    Err(FfmpegError::EffectCraftMissing)
+}
+
+pub fn effectcraft_search_candidates(lookup: &EffectcraftLookup) -> Vec<PathBuf> {
+    let name = cli_name();
+    let mut v = Vec::new();
+    if let Some(env) = &lookup.env {
+        if env.is_absolute() {
+            v.push(env.clone());
+            v.push(env.join(name));
+        }
+    }
+    if let Some(dir) = lookup.current_exe.as_ref().and_then(|p| p.parent()) {
+        v.push(dir.join(name));
+    }
+    if let Some(dir) = &lookup.registry_install_dir {
+        if dir.is_absolute() {
+            v.push(dir.join(name));
+        }
+    }
+    if let Some(parent) = lookup.current_exe.as_ref().and_then(|p| p.parent()).and_then(|d| d.parent()) {
+        v.push(parent.join("effectcraft").join(name));
+    }
+    for dir in &lookup.path_dirs {
+        if dir.as_os_str().is_empty() || dir == Path::new(".") || !dir.is_absolute() {
+            continue;
+        }
+        v.push(dir.join(name));
+    }
+    v.extend(lookup.extra.iter().cloned());
+    v
+}
+
+fn cli_name() -> &'static str {
+    if cfg!(windows) {
+        "effectcraft-cli.exe"
+    } else {
+        "effectcraft-cli"
+    }
+}
+
+#[cfg(windows)]
+fn effectcraft_registry_install_dir() -> Option<PathBuf> {
+    let out = Command::new("reg")
+        .args(["query", r"HKCU\Software\effectcraft", "/v", "InstallDir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_reg_install_dir(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(not(windows))]
+fn effectcraft_registry_install_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_reg_install_dir(stdout: &str) -> Option<PathBuf> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("installdir") {
+            continue;
+        }
+        if let Some(idx) = lower.find("reg_sz") {
+            let val = line[idx + "reg_sz".len()..].trim();
+            if !val.is_empty() {
+                return Some(PathBuf::from(val));
+            }
+        }
+        if let Some(idx) = lower.find("reg_expand_sz") {
+            let val = line[idx + "reg_expand_sz".len()..].trim();
+            if !val.is_empty() {
+                return Some(PathBuf::from(val));
+            }
+        }
+    }
+    None
+}
+
+fn leftover_effectcraft_candidates(current_exe: Option<&Path>) -> Vec<PathBuf> {
+    let name = cli_name();
+    let mut v = Vec::new();
+    if let Some(dir) = current_exe.and_then(|p| p.parent()) {
+        // Sibling checkout: encode from target/debug → ../../effectcraft/target/release
+        if let Some(root) = dir.parent().and_then(|p| p.parent()) {
+            v.push(root.join("effectcraft").join("target").join("release").join(name));
+        }
+    }
+    if cfg!(windows) {
+        v.push(PathBuf::from(r"C:\Program Files\EffectCraft\effectcraft-cli.exe"));
+    } else {
+        v.push(PathBuf::from("/usr/local/bin/effectcraft-cli"));
+        v.push(PathBuf::from("/opt/homebrew/bin/effectcraft-cli"));
+    }
+    v
 }
 
 fn locate_tool(name: &str, env_key: &str, extra: &[PathBuf]) -> Result<PathBuf, FfmpegError> {
@@ -176,26 +301,6 @@ fn ffprobe_candidates() -> Vec<PathBuf> {
         .collect()
 }
 
-fn effectcraft_candidates() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let name = if cfg!(windows) { "effectcraft-cli.exe" } else { "effectcraft-cli" };
-            v.push(dir.join(name));
-            // Sibling checkout: ../effectcraft/target/release/effectcraft-cli
-            if let Some(root) = dir.parent().and_then(|p| p.parent()) {
-                v.push(root.join("effectcraft").join("target").join("release").join(name));
-            }
-        }
-    }
-    if cfg!(windows) {
-        v.push(PathBuf::from(r"C:\Program Files\EffectCraft\effectcraft-cli.exe"));
-    } else {
-        v.push(PathBuf::from("/usr/local/bin/effectcraft-cli"));
-        v.push(PathBuf::from("/opt/homebrew/bin/effectcraft-cli"));
-    }
-    v
-}
 
 #[cfg(test)]
 mod tests {
@@ -240,5 +345,120 @@ mod tests {
             assert!(p.is_absolute());
             assert_ne!(p, plant, "must not use a binary planted next to the test exe via cwd");
         }
+    }
+
+    fn plant_cli(dir: &Path) -> PathBuf {
+        let _ = std::fs::create_dir_all(dir);
+        let p = dir.join(cli_name());
+        std::fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn effectcraft_search_order_env_sidecar_registry_sibling_then_path() {
+        let encode = PathBuf::from(r"/home/ada/.local/Programs/Craft/EncodeCraft/encodecraft");
+        let registry = PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft");
+        let path_dir = PathBuf::from("/usr/bin");
+        let lookup = EffectcraftLookup {
+            env: Some(PathBuf::from("/opt/override/effectcraft-cli")),
+            current_exe: Some(encode),
+            registry_install_dir: Some(registry),
+            path_dirs: vec![path_dir],
+            extra: vec![],
+        };
+        let c = effectcraft_search_candidates(&lookup);
+        let name = cli_name();
+        assert_eq!(c[0], PathBuf::from("/opt/override/effectcraft-cli"));
+        assert_eq!(c[1], PathBuf::from("/opt/override/effectcraft-cli").join(name));
+        assert_eq!(c[2], PathBuf::from(r"/home/ada/.local/Programs/Craft/EncodeCraft").join(name));
+        assert_eq!(c[3], PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft").join(name));
+        assert_eq!(c[4], PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft").join(name));
+        assert_eq!(c[5], PathBuf::from("/usr/bin").join(name));
+        assert_eq!(c.len(), 6);
+    }
+
+    #[test]
+    fn office_install_finds_registry_then_sibling_before_path() {
+        let root = std::env::temp_dir().join(format!("ec-craft-lookup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let encode_dir = root.join("Craft").join("EncodeCraft");
+        let sibling_dir = root.join("Craft").join("effectcraft");
+        let registry_dir = root.join("registry-install");
+        let path_dir = root.join("on-path");
+        let _ = std::fs::create_dir_all(&encode_dir);
+        let sidecar = plant_cli(&encode_dir);
+        let sibling = plant_cli(&sibling_dir);
+        let registry = plant_cli(&registry_dir);
+        let on_path = plant_cli(&path_dir);
+        let exe = encode_dir.join("encodecraft");
+
+        let found = find_effectcraft_cli_with(&EffectcraftLookup {
+            env: None,
+            current_exe: Some(exe.clone()),
+            registry_install_dir: Some(registry_dir.clone()),
+            path_dirs: vec![path_dir.clone()],
+            extra: vec![],
+        })
+        .expect("sidecar next to EncodeCraft wins");
+        assert_eq!(found, sidecar);
+
+        std::fs::remove_file(&sidecar).unwrap();
+        let found = find_effectcraft_cli_with(&EffectcraftLookup {
+            env: None,
+            current_exe: Some(exe.clone()),
+            registry_install_dir: Some(registry_dir.clone()),
+            path_dirs: vec![path_dir.clone()],
+            extra: vec![],
+        })
+        .expect("HKCU InstallDir wins after sidecar");
+        assert_eq!(found, registry);
+
+        std::fs::remove_file(&registry).unwrap();
+        let found = find_effectcraft_cli_with(&EffectcraftLookup {
+            env: None,
+            current_exe: Some(exe.clone()),
+            registry_install_dir: Some(registry_dir),
+            path_dirs: vec![path_dir.clone()],
+            extra: vec![],
+        })
+        .expect("sibling Craft\\\\effectcraft wins after registry");
+        assert_eq!(found, sibling);
+
+        std::fs::remove_file(&sibling).unwrap();
+        let found = find_effectcraft_cli_with(&EffectcraftLookup {
+            env: None,
+            current_exe: Some(exe),
+            registry_install_dir: None,
+            path_dirs: vec![path_dir],
+            extra: vec![],
+        })
+        .expect("PATH is last");
+        assert_eq!(found, on_path);
+
+        let missing = find_effectcraft_cli_with(&EffectcraftLookup::default());
+        assert!(matches!(missing, Err(FfmpegError::EffectCraftMissing)));
+        let msg = FfmpegError::EffectCraftMissing.to_string();
+        assert!(msg.contains("EFFECTCRAFT_CLI"), "{msg}");
+        assert!(msg.contains("InstallDir"), "{msg}");
+        assert!(msg.contains("PATH"), "{msg}");
+        assert!(msg.contains("sibling") || msg.contains("effectcraft"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parses_effectcraft_installdir_reg_query() {
+        let stdout = "\nHKEY_CURRENT_USER\\Software\\effectcraft\n    InstallDir    REG_SZ    C:\\Users\\ASUS\\AppData\\Local\\Programs\\Craft\\effectcraft\n";
+        assert_eq!(
+            parse_reg_install_dir(stdout),
+            Some(PathBuf::from(r"C:\Users\ASUS\AppData\Local\Programs\Craft\effectcraft"))
+        );
+        assert!(parse_reg_install_dir("ERROR: The system was unable to find the specified registry key or value.").is_none());
     }
 }

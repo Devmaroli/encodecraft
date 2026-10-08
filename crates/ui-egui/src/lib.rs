@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, CornerRadius, Pos2, RichText, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_engine::{classify_dropped_paths, seed_preset_ui_demo, seed_stress_queue, DropOutcome, Handle, IoCmd, UiEvent};
-use encodecraft_job::{ScaleMode, PRODUCT};
+use encodecraft_job::{display_path, ScaleMode, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
 
@@ -634,7 +634,7 @@ impl EncodeApp {
             }
             ui.separator();
             ui.label("Output");
-            ui.add(egui::Label::new(RichText::new(job.output.to_string_lossy().to_string()).color(t.link)).truncate());
+            ui.add(egui::Label::new(RichText::new(display_path(&job.output)).color(t.link)).truncate());
         });
         if let Some(w) = &job.encode_warning {
             ui.label(RichText::new(w).color(t.warning).size(12.0));
@@ -775,7 +775,7 @@ impl EncodeApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(job.source.display_name()).strong());
-                ui.label(RichText::new(job.source.path_hint().display().to_string()).color(t.link));
+                ui.label(RichText::new(display_path(job.source.path_hint())).color(t.link));
                 if let (Some(w), Some(h)) = (job.preset.video.width, job.preset.video.height) {
                     if let Some(d) = job.duration_sec {
                         ui.label(format!("{w}×{h} · {}", encodecraft_ffmpeg::format_duration(d)));
@@ -790,7 +790,7 @@ impl EncodeApp {
                         ui.label("Reading source…");
                     });
                 }
-                ui.label(RichText::new(format!("-> {}", job.output.display())).color(t.link));
+                ui.label(RichText::new(format!("-> {}", display_path(&job.output))).color(t.link));
             });
             ui.add_space(16.0);
             if let Some(tex) = self.ensure_thumb(ui.ctx(), &job) {

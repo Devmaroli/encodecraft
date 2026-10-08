@@ -8,7 +8,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,48 @@ pub const MAX_CONTROL_BODY: usize = 256 * 1024;
 
 /// Hard cap on one-source-many-sizes expansion.
 pub const MAX_SIZES: usize = 64;
+
+/// Strip a Windows long-path / verbatim prefix for display and Explorer.
+///
+/// `\\?\C:\foo` → `C:\foo`. `\\?\UNC\server\share` → `\\server\share`.
+/// Internal encode paths may keep the prefix; UI and `explorer.exe` should not.
+pub fn strip_verbatim_path(s: &str) -> String {
+    const UNC: &str = r"\\?\UNC\";
+    const VERB: &str = r"\\?\";
+    if let Some(rest) = strip_prefix_ignore_ascii_case(s, UNC) {
+        let mut out = String::from(r"\\");
+        out.push_str(rest);
+        return out;
+    }
+    if let Some(rest) = strip_prefix_ignore_ascii_case(s, VERB) {
+        return rest.to_string();
+    }
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
+    }
+    if let Some(rest) = s.strip_prefix("//?/") {
+        return rest.to_string();
+    }
+    s.to_string()
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes()) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// [`strip_verbatim_path`] applied to a filesystem path.
+pub fn display_path(path: impl AsRef<Path>) -> String {
+    strip_verbatim_path(&path.as_ref().to_string_lossy())
+}
+
+/// Same as [`display_path`] as a `PathBuf` (Explorer / exists checks).
+pub fn display_path_buf(path: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(display_path(path))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
@@ -827,5 +869,27 @@ mod tests {
             start_queue: false,
         };
         assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn strip_verbatim_path_windows_long_and_unc() {
+        assert_eq!(
+            strip_verbatim_path(r"\\?\C:\Users\ASUS\Documents\Craft\Output\InstallTest _ Eye of Kuwait_1920x1080.mp4"),
+            r"C:\Users\ASUS\Documents\Craft\Output\InstallTest _ Eye of Kuwait_1920x1080.mp4"
+        );
+        assert_eq!(
+            strip_verbatim_path(r"\\?\UNC\fileserver\share\Output\out.mp4"),
+            r"\\fileserver\share\Output\out.mp4"
+        );
+        assert_eq!(strip_verbatim_path(r"C:\Users\ASUS\out.mp4"), r"C:\Users\ASUS\out.mp4");
+        assert_eq!(strip_verbatim_path("/home/ada/out.mp4"), "/home/ada/out.mp4");
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\ASUS\Documents\spot.ecproj")),
+            r"C:\Users\ASUS\Documents\spot.ecproj"
+        );
+        assert_eq!(
+            display_path_buf(Path::new(r"\\?\UNC\office\jobs\spot.ecproj")),
+            PathBuf::from(r"\\office\jobs\spot.ecproj")
+        );
     }
 }

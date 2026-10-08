@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
-use encodecraft_job::ScreenSize;
+use encodecraft_job::{display_path, display_path_buf, ScreenSize};
 use encodecraft_presets::{
     ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality, ScreenMatchRule, BETTER_RES_ID, INSTALLATION_ID,
 };
@@ -314,8 +314,8 @@ impl EncodeApp {
             }
         });
         let mut out_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.out).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let out_label = job.output.to_string_lossy().into_owned();
-        let folder_tip = job.output.parent().map(|p| p.display().to_string()).unwrap_or_else(|| out_label.clone());
+        let out_label = display_path(&job.output);
+        let folder_tip = job.output.parent().map(display_path).unwrap_or_else(|| out_label.clone());
         let out_r = out_ui.add(
             egui::Label::new(RichText::new(out_label).size(11.0).color(t.link))
                 .truncate()
@@ -1478,6 +1478,8 @@ enum RevealPlan {
 
 /// Select the file if it exists; otherwise create the parent folder and open it.
 fn plan_reveal(path: &Path) -> Result<RevealPlan, String> {
+    let cleaned = display_path_buf(path);
+    let path = cleaned.as_path();
     if path.exists() {
         if path.is_dir() {
             return Ok(RevealPlan::OpenDir(path.to_path_buf()));
@@ -1593,6 +1595,18 @@ mod reveal_tests {
     fn opens_directory_path() {
         let dir = tmp_root();
         assert_eq!(plan_reveal(&dir).ok(), Some(RevealPlan::OpenDir(dir.clone())));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strips_windows_long_path_prefix_before_select() {
+        let dir = tmp_root();
+        let file = dir.join("clip.mp4");
+        let Ok(()) = fs::write(&file, b"x") else {
+            return;
+        };
+        let prefixed = PathBuf::from(format!(r"\\?\{}", file.display()));
+        assert_eq!(plan_reveal(&prefixed).ok(), Some(RevealPlan::Select(file)));
         let _ = fs::remove_dir_all(&dir);
     }
 }

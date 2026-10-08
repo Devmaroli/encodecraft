@@ -62,6 +62,8 @@ Unknown schema values return HTTP 400 with a readable error.
 }
 ```
 
+`start_queue` starts the encoder only when Settings ▸ **Start queue automatically when jobs arrive** is on (off by default). Otherwise jobs land as Ready until **Start queue**. Default output naming is `{comp}` (exact composition name, or the dropped file’s base name).
+
 `sizes` empty → one job at the preset's resolution (match source if unset).
 `sizes` set → one queue item per size ("one source to many screens").
 Match-source `{width}`/`{height}` come from `source.width`/`source.height` (EffectCraft comp size),

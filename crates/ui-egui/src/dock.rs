@@ -20,7 +20,7 @@ pub const BUILTIN_FULL: &str = "full";
 pub const BUILTIN_QUEUE: &str = "queue-only";
 pub const BUILTIN_PRESETS: &str = "presets-queue";
 
-const LAYOUT_VERSION: u32 = 1;
+const LAYOUT_VERSION: u32 = 2;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,10 +33,11 @@ pub enum PanelKind {
     Log,
     WatchFolders,
     Settings,
+    EncodePreview,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 7] = [
+    pub const ALL: [PanelKind; 8] = [
         PanelKind::Queue,
         PanelKind::PresetBrowser,
         PanelKind::Encoding,
@@ -44,6 +45,7 @@ impl PanelKind {
         PanelKind::Log,
         PanelKind::WatchFolders,
         PanelKind::Settings,
+        PanelKind::EncodePreview,
     ];
 
     pub fn title(self) -> &'static str {
@@ -55,6 +57,7 @@ impl PanelKind {
             Self::Log => "Log",
             Self::WatchFolders => "Watch Folders",
             Self::Settings => "Settings",
+            Self::EncodePreview => "Encoding Preview",
         }
     }
 
@@ -67,6 +70,7 @@ impl PanelKind {
             Self::Log => "Log",
             Self::WatchFolders => "Watch",
             Self::Settings => "Settings",
+            Self::EncodePreview => "Preview",
         }
     }
 
@@ -79,6 +83,7 @@ impl PanelKind {
             Self::Log => (egui::Key::Num5, "Ctrl+5"),
             Self::WatchFolders => (egui::Key::Num6, "Ctrl+6"),
             Self::Settings => (egui::Key::Num7, "Ctrl+7"),
+            Self::EncodePreview => (egui::Key::Num8, "Ctrl+8"),
         }
     }
 }
@@ -289,11 +294,12 @@ pub fn empty_dock() -> DockState<PanelKind> {
 pub fn layout_full() -> DockState<PanelKind> {
     let mut dock = DockState::new(vec![PanelKind::Queue]);
     let _ = dock.main_surface_mut().split_right(NodeIndex::root(), 0.72, vec![PanelKind::PresetBrowser]);
-    let _ = dock.main_surface_mut().split_below(
+    let [_top, bottom] = dock.main_surface_mut().split_below(
         NodeIndex::root(),
-        0.64,
+        0.56,
         vec![PanelKind::Encoding, PanelKind::Source, PanelKind::Log, PanelKind::WatchFolders, PanelKind::Settings],
     );
+    let _ = dock.main_surface_mut().split_right(bottom, 0.58, vec![PanelKind::EncodePreview]);
     dock.translations.tab_context_menu.eject_button = "Pop out".into();
     dock.translations.tab_context_menu.close_button = "Close panel".into();
     dock
@@ -402,6 +408,7 @@ impl TabViewer for AppTabs<'_> {
             PanelKind::Log => self.app.log_panel(ui),
             PanelKind::WatchFolders => self.app.watch_panel(ui),
             PanelKind::Settings => self.app.settings_panel(ui),
+            PanelKind::EncodePreview => self.app.encode_preview_panel(ui),
         }
     }
 
@@ -427,7 +434,7 @@ impl TabViewer for AppTabs<'_> {
 
     fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
         match tab {
-            PanelKind::Queue | PanelKind::PresetBrowser | PanelKind::Log => [false, false],
+            PanelKind::Queue | PanelKind::PresetBrowser | PanelKind::Log | PanelKind::EncodePreview => [false, false],
             _ => [false, true],
         }
     }
@@ -1105,7 +1112,7 @@ fn workspace_card(ui: &mut Ui, t: &Tokens, name: &str, builtin: Option<&str>, do
             }
         });
         let caption = match builtin {
-            Some(BUILTIN_FULL) => "Everything, like today. Best on one big screen.",
+            Some(BUILTIN_FULL) => "Queue, presets, inspector, and encoding preview. Best on one big screen.",
             Some(BUILTIN_QUEUE) => "Just the queue, full window. For watching a long render.",
             Some(BUILTIN_PRESETS) => "Big Preset Browser next to the queue. For setting up a send.",
             _ => "",
@@ -1234,13 +1241,20 @@ mod tests {
     }
 
     #[test]
-    fn full_layout_has_all_seven_panels() {
+    fn full_layout_has_all_panels() {
         let dock = layout_full();
         let tabs = tabs_in(&dock);
         assert_eq!(tabs, PanelKind::ALL.to_vec());
         assert!(dock.find_tab(&PanelKind::Queue).is_some());
         assert!(dock.find_tab(&PanelKind::PresetBrowser).is_some());
         assert_eq!(dock.find_tab(&PanelKind::Encoding).map(|t| t.0.is_main()), Some(true));
+        assert_eq!(dock.find_tab(&PanelKind::EncodePreview).map(|t| t.0.is_main()), Some(true));
+        let enc = dock.find_tab(&PanelKind::Encoding);
+        let prev = dock.find_tab(&PanelKind::EncodePreview);
+        if let (Some(e), Some(p)) = (enc, prev) {
+            assert_eq!(e.0, p.0);
+            assert_ne!(e.1, p.1, "Encoding Preview should be its own leaf, not a tab on the inspector");
+        }
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub struct Settings {
     /// Recently applied preset ids (most recent first).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_preset_ids: Vec<String>,
+    /// Decode a low-res frame from the encode for the Encoding Preview panel.
+    /// Off skips that extra FFmpeg process entirely.
+    #[serde(default = "default_true")]
+    pub show_encode_preview: bool,
 }
 
 fn default_true() -> bool {
@@ -78,6 +82,7 @@ impl Default for Settings {
             allow_overwrite: false,
             stall_timeout_sec: 120,
             recent_preset_ids: Vec::new(),
+            show_encode_preview: true,
         }
     }
 }

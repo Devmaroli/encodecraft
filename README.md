@@ -27,9 +27,10 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 - Tall canvases (any side > 4096, e.g. 1008×5184) use H.264 **level 6.2**; frames H.264 cannot encode are flagged on the queue item
 - Output **naming** (`{name}_{width}x{height}`). Default destination is an `Output` folder next to the EffectCraft project or dropped file (Settings can use a fixed folder instead)
 - **Watch folders** (dockable panel)
-- **Dockable panels and workspaces** (After Effects-style): drag a panel tab to left / right / top / bottom / center, or ☰ → Pop out for a real OS window. Window menu (Ctrl+1–7), workspace switcher (Full, Queue only, Presets + Queue, Alt+Shift+1–3), user layouts with thumbnails. Layout, floating windows and monitor are remembered on close; missing monitors dock floats back.
+- **Dockable panels and workspaces** (After Effects-style): drag a panel tab to left / right / top / bottom / center, or ☰ → Pop out for a real OS window. Window menu (Ctrl+1–8), workspace switcher (Full, Queue only, Presets + Queue, Alt+Shift+1–3), user layouts with thumbnails. Layout, floating windows and monitor are remembered on close; missing monitors dock floats back.
+- **Encoding Preview** (Media Encoder-style): live decoded frames of the file while it encodes, a few fps, letterboxed for odd DOOH sizes (1008×5184, 6080×720) with a size badge. Stats under the picture: output name, progress, frame / 25 fps timecode, elapsed / remaining, speed × and fps, bitrate. Render 2+ at once shows a tile per job (click to enlarge). Toggle **Show preview while rendering** — off costs nothing. Idle shows the last finished frame or “Nothing rendering”. Docked in the Full workspace; pop-out like any other panel.
 - **Palette B** Neutral warm dark: background `#1B1B1D`, panels `#232326`, Cobalt `#2448F5` fills only (primary buttons, active tab, progress, selected edge). Links and paths use `#8EA2FF`.
-- Per-job percent / ETA / speed, log, source thumbnail. The UI thread never waits on FFmpeg; lists are virtualized for 500+ outputs.
+- Per-job percent / ETA / speed, log, source thumbnail, live encode preview. The UI thread never waits on FFmpeg; lists are virtualized for 500+ outputs.
 - Queue, presets, settings and **panel layout** persist between runs
 - **EffectCraft handoff**: `POST /v1/enqueue` on `127.0.0.1:9878`, CLI `enqueue`, inbox drop if the app is not running — see [docs/effectcraft-integration.md](docs/effectcraft-integration.md)
 

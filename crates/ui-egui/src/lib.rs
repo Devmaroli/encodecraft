@@ -3,6 +3,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod dock;
+mod encode_preview;
 mod panels;
 mod perf;
 mod theme;
@@ -37,6 +38,9 @@ pub struct EncodeApp {
     show_about: bool,
     pub(crate) edit_preset: Option<ExportPreset>,
     thumb_tex: HashMap<String, egui::TextureHandle>,
+    preview_tex: HashMap<String, egui::TextureHandle>,
+    preview_focus: Option<String>,
+    last_preview: Option<encode_preview::LastPreview>,
     pub(crate) status: String,
     drop_notice: Option<(String, Instant)>,
     ecproj_picker: Option<EcprojPicker>,
@@ -111,6 +115,9 @@ impl EncodeApp {
             show_about: false,
             edit_preset: None,
             thumb_tex: HashMap::new(),
+            preview_tex: HashMap::new(),
+            preview_focus: None,
+            last_preview: None,
             status: String::new(),
             drop_notice: None,
             ecproj_picker: None,
@@ -155,6 +162,12 @@ impl EncodeApp {
                     let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
                     let tex = ctx.load_texture(format!("th-{id}"), color, egui::TextureOptions::LINEAR);
                     self.thumb_tex.insert(id, tex);
+                }
+                UiEvent::PreviewFrame { id, name, rgba, w, h, output_w, output_h } => {
+                    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                    let tex = ctx.load_texture(format!("prev-{id}"), color, egui::TextureOptions::LINEAR);
+                    self.preview_tex.insert(id.clone(), tex);
+                    self.last_preview = Some(encode_preview::LastPreview { id, name, output_w, output_h });
                 }
                 UiEvent::Ecproj { path, comps, note } => {
                     let selected = if comps.is_empty() { Vec::new() } else { vec![true; comps.len()] };
@@ -868,6 +881,19 @@ impl EncodeApp {
             ui.label(RichText::new("EffectCraft posts to 127.0.0.1:this").small());
         });
         ui.checkbox(&mut s.auto_start_queue, "Start the queue when a job arrives from EffectCraft / the CLI");
+        ui.add_space(8.0);
+        ui.label(RichText::new("Encoding preview").strong());
+        let mut preview = s.show_encode_preview;
+        if ui.checkbox(&mut preview, "Show preview while rendering").changed() {
+            s.show_encode_preview = preview;
+            self.handle.lock(|sess| sess.settings.show_encode_preview = preview);
+            self.handle.mark_dirty();
+        }
+        ui.label(
+            RichText::new("Decodes a low-res frame from the encode a couple of times a second. Turn off to skip that extra FFmpeg work.")
+                .small()
+                .color(self.t().text_dim),
+        );
         ui.add_space(8.0);
         ui.label(RichText::new("Studio screen assignment").strong());
         ui.label(

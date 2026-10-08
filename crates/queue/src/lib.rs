@@ -111,11 +111,25 @@ pub struct ProgressSnap {
     pub eta_sec: Option<f64>,
     pub speed: f32,
     pub fps: f32,
+    #[serde(default)]
+    pub frame: u64,
+    #[serde(default)]
+    pub out_time_sec: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<f32>,
 }
 
 impl From<&EncodeProgress> for ProgressSnap {
     fn from(p: &EncodeProgress) -> Self {
-        Self { percent: p.percent, eta_sec: p.eta_sec, speed: p.speed, fps: p.fps }
+        Self {
+            percent: p.percent,
+            eta_sec: p.eta_sec,
+            speed: p.speed,
+            fps: p.fps,
+            frame: p.frame,
+            out_time_sec: p.out_time_sec,
+            bitrate_kbps: p.bitrate_kbps,
+        }
     }
 }
 

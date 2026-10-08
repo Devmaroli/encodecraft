@@ -9,6 +9,8 @@ pub struct EncodeProgress {
     pub frame: u64,
     pub done: bool,
     pub eta_sec: Option<f64>,
+    /// Instantaneous video bitrate from `-progress`, in kbit/s.
+    pub bitrate_kbps: Option<f32>,
 }
 
 impl EncodeProgress {
@@ -84,6 +86,17 @@ pub fn parse_progress_line(line: &str, acc: &mut EncodeProgress, duration_sec: O
                 return true;
             }
         }
+        "bitrate" => {
+            let t = v.trim();
+            if t.eq_ignore_ascii_case("N/A") {
+                return false;
+            }
+            let n = t.trim_end_matches("kbits/s").trim_end_matches("kbit/s").trim();
+            if let Ok(b) = n.parse::<f32>() {
+                acc.bitrate_kbps = Some(b.max(0.0));
+                return true;
+            }
+        }
         "progress" => {
             if v == "end" {
                 acc.done = true;
@@ -137,5 +150,14 @@ mod tests {
         parse_progress_line("progress=end", &mut p, Some(10.0));
         assert!(p.done);
         assert_eq!(p.percent, 100.0);
+    }
+
+    #[test]
+    fn bitrate_kbits() {
+        let mut p = EncodeProgress::default();
+        parse_progress_line("bitrate=  7842.3kbits/s", &mut p, None);
+        assert!((p.bitrate_kbps.unwrap_or(0.0) - 7842.3).abs() < 0.05);
+        parse_progress_line("bitrate=N/A", &mut p, None);
+        assert!((p.bitrate_kbps.unwrap_or(0.0) - 7842.3).abs() < 0.05);
     }
 }

@@ -10,6 +10,7 @@ mod fsutil;
 mod ipc;
 mod paths;
 mod persist;
+mod preview;
 mod tasks;
 mod token;
 mod watch;
@@ -156,6 +157,14 @@ impl Handle {
             }
         }
         Vec::new()
+    }
+
+    pub fn emit_ui(&self, ev: tasks::UiEvent) {
+        if let Ok(g) = self.io.lock() {
+            if let Some(hub) = g.as_ref() {
+                let _ = hub.events.send(ev);
+            }
+        }
     }
 
     pub fn schedule_probe(&self, ids: Vec<String>) {
@@ -311,6 +320,8 @@ impl Handle {
         }
         let h = self.clone();
         thread::Builder::new().name("encodecraft-worker".into()).spawn(move || worker::run(h)).ok();
+        let h = self.clone();
+        thread::Builder::new().name("encodecraft-preview".into()).spawn(move || preview::run(h)).ok();
         let h = self.clone();
         thread::Builder::new().name("encodecraft-watch".into()).spawn(move || watch::run(h)).ok();
         let h = self.clone();

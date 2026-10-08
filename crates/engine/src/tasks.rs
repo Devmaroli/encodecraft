@@ -26,6 +26,7 @@ pub enum IoCmd {
 pub enum UiEvent {
     Changed,
     Thumb { id: String, rgba: Vec<u8>, w: u32, h: u32 },
+    PreviewFrame { id: String, name: String, rgba: Vec<u8>, w: u32, h: u32, output_w: u32, output_h: u32 },
     Ecproj { path: PathBuf, comps: Vec<String>, note: Option<String> },
     Dropped(DropOutcome),
     Slow { name: String, ms: f64 },
@@ -34,6 +35,7 @@ pub enum UiEvent {
 #[derive(Clone)]
 pub struct IoHub {
     pub tx: Sender<IoCmd>,
+    pub events: Sender<UiEvent>,
     rx: Arc<Mutex<Receiver<UiEvent>>>,
 }
 
@@ -54,12 +56,12 @@ pub fn start(handle: Handle) -> IoHub {
     let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
     let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>();
     let worker = handle.clone();
-    let events = ui_tx;
+    let events = ui_tx.clone();
     thread::Builder::new()
         .name("encodecraft-io".into())
-        .spawn(move || io_loop(worker, cmd_rx, events))
+        .spawn(move || io_loop(worker, cmd_rx, ui_tx))
         .ok();
-    IoHub { tx: cmd_tx, rx: Arc::new(Mutex::new(ui_rx)) }
+    IoHub { tx: cmd_tx, events, rx: Arc::new(Mutex::new(ui_rx)) }
 }
 
 fn io_loop(h: Handle, rx: Receiver<IoCmd>, ui: Sender<UiEvent>) {

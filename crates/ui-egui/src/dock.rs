@@ -215,6 +215,9 @@ impl LayoutSession {
         s.dock = file.dock;
         s.active = file.active;
         s.user = file.user_workspaces;
+        if uniquify_reserved_user_names(&mut s.user) {
+            s.dirty = true;
+        }
         for (i, f) in file.floats.into_iter().enumerate() {
             s.floats.push(float_from_saved(i as u64 + 1, f));
         }
@@ -336,6 +339,22 @@ pub fn builtin_label(id: &str) -> &'static str {
         BUILTIN_PRESETS => "Presets + Queue",
         _ => "Workspace",
     }
+}
+
+pub fn is_reserved_workspace_name(name: &str) -> bool {
+    let n = name.trim();
+    [BUILTIN_FULL, BUILTIN_QUEUE, BUILTIN_PRESETS].iter().any(|id| n.eq_ignore_ascii_case(builtin_label(id)))
+}
+
+fn uniquify_reserved_user_names(user: &mut [UserWorkspace]) -> bool {
+    let mut changed = false;
+    for ws in user {
+        if is_reserved_workspace_name(&ws.name) {
+            ws.name = format!("{} (saved)", ws.name.trim());
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn dock_style(ui: &Ui, t: &Tokens) -> Style {
@@ -803,10 +822,14 @@ impl EncodeApp {
         }
     }
 
-    fn save_current_as(&mut self, name: String) {
+    fn save_current_as(&mut self, name: String) -> bool {
         let name = name.trim();
         if name.is_empty() {
-            return;
+            return false;
+        }
+        if is_reserved_workspace_name(name) {
+            self.status = format!("“{name}” is a built-in workspace. Choose another name.");
+            return false;
         }
         let id = format!("user-{}", now_millis());
         let ws = self.snapshot_user(id.clone(), name.to_string());
@@ -814,6 +837,7 @@ impl EncodeApp {
         self.layout.active = id;
         self.layout.mark_dirty();
         self.status = format!("Saved layout as {name}");
+        true
     }
 
     pub(crate) fn active_workspace_name(&self) -> String {
@@ -931,7 +955,6 @@ impl EncodeApp {
     pub(crate) fn workspace_switcher(&mut self, ui: &mut Ui) {
         let t = self.t();
         ui.spacing_mut().item_spacing.x = 4.0;
-        let current = self.active_workspace_name();
         ui.label(RichText::new("Workspace").color(t.text_dim).size(12.0));
         let chip = |id: &'static str| -> bool { self.layout.active == id };
         for (id, label) in [(BUILTIN_FULL, "Full"), (BUILTIN_QUEUE, "Queue only"), (BUILTIN_PRESETS, "Presets + Queue")] {
@@ -954,9 +977,10 @@ impl EncodeApp {
                 self.pending.push(DockCmd::ApplyUser { idx });
             }
         }
-        ui.menu_button(format!("{current}  ▾"), |ui| {
+        let menu = ui.menu_button(RichText::new("▾").size(12.0), |ui| {
             self.workspaces_submenu(ui);
         });
+        menu.response.on_hover_text("Save, reset, or manage workspaces");
     }
 
     pub(crate) fn save_as_dialog(&mut self, ctx: &egui::Context) {
@@ -974,8 +998,12 @@ impl EncodeApp {
             .show(ctx, |ui| {
                 ui.label("Names your current arrangement.");
                 ui.add(egui::TextEdit::singleline(&mut self.save_as_name).desired_width(280.0).hint_text("Night shift"));
+                if is_reserved_workspace_name(&self.save_as_name) {
+                    ui.label(RichText::new("Built-in names (Full, Queue only, Presets + Queue) are reserved.").color(self.t().danger).small());
+                }
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Save").fill(self.t().accent)).clicked() {
+                    let can = !self.save_as_name.trim().is_empty() && !is_reserved_workspace_name(&self.save_as_name);
+                    if ui.add_enabled(can, egui::Button::new("Save").fill(self.t().accent)).clicked() {
                         save = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -985,8 +1013,9 @@ impl EncodeApp {
             });
         if save {
             let name = std::mem::take(&mut self.save_as_name);
-            self.save_current_as(name);
-            self.show_save_as = false;
+            if self.save_current_as(name) {
+                self.show_save_as = false;
+            }
         }
         if cancel || !open {
             self.show_save_as = false;
@@ -1066,14 +1095,16 @@ impl EncodeApp {
                         ui.label("Rename");
                         ui.add(egui::TextEdit::singleline(&mut self.rename_buf).desired_width(200.0));
                         if ui.button("Apply").clicked() {
-                            if let Some(ws) = self.layout.user.get_mut(idx) {
-                                let n = self.rename_buf.trim();
-                                if !n.is_empty() {
-                                    ws.name = n.to_string();
-                                }
+                            let n = self.rename_buf.trim();
+                            if n.is_empty() {
+                                self.rename_idx = None;
+                            } else if is_reserved_workspace_name(n) {
+                                self.status = format!("“{n}” is a built-in workspace. Choose another name.");
+                            } else if let Some(ws) = self.layout.user.get_mut(idx) {
+                                ws.name = n.to_string();
+                                self.rename_idx = None;
+                                self.layout.mark_dirty();
                             }
-                            self.rename_idx = None;
-                            self.layout.mark_dirty();
                         }
                         if ui.button("Cancel").clicked() {
                             self.rename_idx = None;
@@ -1317,6 +1348,36 @@ mod tests {
             assert!(builtin_dock(id).is_some());
             assert!(!id.starts_with("user-"));
         }
+    }
+
+    #[test]
+    fn builtin_workspace_names_are_reserved() {
+        assert!(is_reserved_workspace_name("Full"));
+        assert!(is_reserved_workspace_name(" full "));
+        assert!(is_reserved_workspace_name("Queue only"));
+        assert!(is_reserved_workspace_name("Presets + Queue"));
+        assert!(!is_reserved_workspace_name("Night shift"));
+        assert!(!is_reserved_workspace_name("Full (saved)"));
+    }
+
+    #[test]
+    fn load_renames_user_workspace_clashing_with_builtin() {
+        let dir = std::env::temp_dir().join(format!("ec-layout-full-{}-{}", std::process::id(), now_millis()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("layout.json");
+        let mut s = LayoutSession::new();
+        s.user.push(UserWorkspace {
+            id: "user-1".into(),
+            name: "Full".into(),
+            dock: layout_queue_only(),
+            floats: Vec::new(),
+        });
+        s.save_to(&path);
+        let loaded = LayoutSession::load_from(&path);
+        assert_eq!(loaded.user.len(), 1);
+        assert_eq!(loaded.user[0].name, "Full (saved)");
+        assert!(!is_reserved_workspace_name(&loaded.user[0].name));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

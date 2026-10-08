@@ -977,7 +977,7 @@ impl EncodeApp {
                 self.pending.push(DockCmd::ApplyUser { idx });
             }
         }
-        let menu = ui.menu_button(RichText::new("▾").size(12.0), |ui| {
+        let menu = ui.menu_button(RichText::new("...").size(12.0), |ui| {
             self.workspaces_submenu(ui);
         });
         menu.response.on_hover_text("Save, reset, or manage workspaces");

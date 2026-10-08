@@ -1,6 +1,9 @@
 //! Pure queue-selection helpers (marquee, modifiers, remove split).
 
-use egui::Rect;
+use egui::{Pos2, Rect};
+
+/// Pointer travel that turns a click into a marquee drag (egui pixels).
+pub const MARQUEE_DRAG_PX: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarqueeMode {
@@ -51,6 +54,22 @@ pub fn marquee_result(hits: &[String], mode: MarqueeMode, base: &[String]) -> Ve
 
 pub fn ids_touching_marquee(items: &[(String, Rect)], marquee: Rect) -> Vec<String> {
     items.iter().filter(|(_, r)| r.intersects(marquee)).map(|(id, _)| id.clone()).collect()
+}
+
+/// True once the pointer has moved far enough that this is a marquee, not a click.
+pub fn marquee_is_drag(start: Pos2, current: Pos2) -> bool {
+    (current - start).length() >= MARQUEE_DRAG_PX
+}
+
+/// A marquee starts on empty queue space or a row’s non-name columns.
+/// `rows` is `(row_rect, name_column_rect)` for each visible row.
+pub fn should_begin_marquee(pos: Pos2, rows: &[(Rect, Rect)], scroll: Rect) -> bool {
+    for (row, src) in rows {
+        if row.contains(pos) {
+            return !src.contains(pos);
+        }
+    }
+    scroll.contains(pos)
 }
 
 pub fn split_encoding<'a>(jobs: &'a [encodecraft_queue::Job], ids: &[String]) -> (Vec<String>, Vec<String>) {
@@ -114,6 +133,20 @@ mod tests {
         ];
         let band = Rect::from_min_max(egui::pos2(10.0, 15.0), egui::pos2(40.0, 45.0));
         assert_eq!(ids_touching_marquee(&items, band), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn hit_testing_name_column_vs_blank_and_empty() {
+        let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(400.0, 36.0));
+        let src = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(160.0, 36.0));
+        let scroll = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(400.0, 400.0));
+        let rows = [(row, src)];
+        assert!(!should_begin_marquee(egui::pos2(40.0, 18.0), &rows, scroll), "name column keeps reorder");
+        assert!(should_begin_marquee(egui::pos2(300.0, 18.0), &rows, scroll), "status/blank column marquees");
+        assert!(should_begin_marquee(egui::pos2(80.0, 200.0), &rows, scroll), "empty scroll space marquees");
+        assert!(!should_begin_marquee(egui::pos2(900.0, 18.0), &rows, scroll), "outside the queue does not");
+        assert!(!marquee_is_drag(egui::pos2(300.0, 18.0), egui::pos2(301.0, 18.0)));
+        assert!(marquee_is_drag(egui::pos2(300.0, 18.0), egui::pos2(300.0, 40.0)));
     }
 
     #[test]

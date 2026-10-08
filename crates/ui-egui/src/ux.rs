@@ -168,8 +168,18 @@ impl EncodeApp {
         });
     }
 
+    fn marquee_is_active_drag(&self) -> bool {
+        self.marquee.as_ref().is_some_and(|m| crate::select::marquee_is_drag(m.start, m.current))
+    }
+
     fn update_marquee(&mut self, ui: &mut Ui, geoms: &[QueueGeom], _order: &[String], scroll_rect: Rect) {
-        if let Some(pos) = ui.ctx().pointer_interact_pos().or_else(|| ui.input(|i| i.pointer.hover_pos())) {
+        let pos = ui
+            .ctx()
+            .pointer_interact_pos()
+            .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+            .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+        let (pressed, down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.any_released()));
+        if let Some(pos) = pos {
             if let Some(m) = &mut self.marquee {
                 m.current = pos;
                 if pos.y < scroll_rect.top() + 22.0 {
@@ -180,47 +190,52 @@ impl EncodeApp {
             }
         }
         if let Some(m) = self.marquee.clone() {
-            let rect = Rect::from_two_pos(m.start, m.current);
-            let items: Vec<(String, Rect)> = geoms
-                .iter()
-                .flat_map(|g| {
-                    if let Some(id) = &g.job_id {
-                        vec![(id.clone(), g.rect)]
-                    } else {
-                        g.job_ids.iter().map(|id| (id.clone(), g.rect)).collect()
-                    }
-                })
-                .collect();
-            let hits = crate::select::ids_touching_marquee(&items, rect);
-            let mode = if m.toggle {
-                crate::select::MarqueeMode::Toggle
-            } else if m.add {
-                crate::select::MarqueeMode::Add
-            } else {
-                crate::select::MarqueeMode::Replace
-            };
-            self.selected_ids = crate::select::marquee_result(&hits, mode, &m.base);
+            if crate::select::marquee_is_drag(m.start, m.current) {
+                ui.ctx().request_repaint();
+                let rect = Rect::from_two_pos(m.start, m.current);
+                let items: Vec<(String, Rect)> = geoms
+                    .iter()
+                    .flat_map(|g| {
+                        if let Some(id) = &g.job_id {
+                            vec![(id.clone(), g.rect)]
+                        } else {
+                            g.job_ids.iter().map(|id| (id.clone(), g.rect)).collect()
+                        }
+                    })
+                    .collect();
+                let hits = crate::select::ids_touching_marquee(&items, rect);
+                let mode = if m.toggle {
+                    crate::select::MarqueeMode::Toggle
+                } else if m.add {
+                    crate::select::MarqueeMode::Add
+                } else {
+                    crate::select::MarqueeMode::Replace
+                };
+                self.selected_ids = crate::select::marquee_result(&hits, mode, &m.base);
+            }
         }
-        if ui.input(|i| i.pointer.any_released()) {
+        if released {
             self.marquee = None;
         }
-        if self.marquee.is_none() && ui.input(|i| i.pointer.primary_pressed()) {
-            if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                let on_row = geoms.iter().any(|g| g.rect.contains(pos));
-                if !on_row && scroll_rect.contains(pos) {
-                    let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-                    self.marquee = Some(MarqueeState {
-                        start: pos,
-                        current: pos,
-                        add: mods.1,
-                        toggle: mods.0,
-                        base: self.selected_ids.clone(),
-                    });
-                    if !mods.0 && !mods.1 {
-                        self.selected_ids.clear();
-                    }
-                }
+        if self.marquee.is_none() && pressed && down {
+            if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some() {
+                return;
             }
+            let Some(pos) = pos else {
+                return;
+            };
+            let rows: Vec<(Rect, Rect)> = geoms.iter().map(|g| (g.rect, col_layout(g.rect).src)).collect();
+            if !crate::select::should_begin_marquee(pos, &rows, scroll_rect) {
+                return;
+            }
+            let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+            self.marquee = Some(MarqueeState {
+                start: pos,
+                current: pos,
+                add: mods.1,
+                toggle: mods.0,
+                base: self.selected_ids.clone(),
+            });
         }
     }
 
@@ -228,14 +243,14 @@ impl EncodeApp {
         let Some(m) = &self.marquee else {
             return;
         };
-        let rect = Rect::from_two_pos(m.start, m.current);
-        if rect.width() < 2.0 && rect.height() < 2.0 {
+        if !crate::select::marquee_is_drag(m.start, m.current) {
             return;
         }
+        let rect = Rect::from_two_pos(m.start, m.current);
         let t = self.t();
         let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, Id::new("queue-marquee")));
-        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 55));
-        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0_f32, t.accent), StrokeKind::Inside);
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x24, 0x48, 0xF5, 90));
+        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.5_f32, t.accent), StrokeKind::Inside);
     }
 
     pub(crate) fn request_remove_selected(&mut self, jobs: &[Job]) {
@@ -319,10 +334,11 @@ impl EncodeApp {
         }
         if !locked {
             let drag = QueueDrag { ids: g.job_ids.clone(), source_key: g.key.clone(), is_source: true, label: g.title.clone() };
-            if resp.dragged() {
+            let on_name = resp.interact_pointer_pos().is_some_and(|p| col_layout(rect).src.contains(p));
+            if on_name && self.marquee.is_none() && resp.dragged() {
                 egui::DragAndDrop::set_payload(ui.ctx(), drag);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-            } else if resp.hovered() {
+            } else if resp.hovered() && on_name && self.marquee.is_none() {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
             }
         } else if resp.hovered() {
@@ -344,7 +360,7 @@ impl EncodeApp {
             }
         }
         let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-        if resp.clicked() && !resp.dragged() {
+        if resp.clicked() && !resp.dragged() && !self.marquee_is_active_drag() {
             let chevron = rect.left() + 8.0 + 28.0;
             let on_chevron = resp.interact_pointer_pos().is_some_and(|p| p.x < chevron);
             if on_chevron {
@@ -442,19 +458,10 @@ impl EncodeApp {
             let label = name.rsplit(" / ").next().unwrap_or(&name).to_string();
             let drag = QueueDrag { ids, source_key: src_key.clone(), is_source: false, label };
             let on_name = resp.interact_pointer_pos().is_some_and(|p| col_layout(rect).src.contains(p));
-            if resp.drag_started() && !on_name {
-                let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-                self.marquee = Some(MarqueeState {
-                    start: resp.interact_pointer_pos().unwrap_or(rect.center()),
-                    current: resp.interact_pointer_pos().unwrap_or(rect.center()),
-                    add: mods.1,
-                    toggle: mods.0,
-                    base: self.selected_ids.clone(),
-                });
-            } else if on_name && resp.dragged() && self.marquee.is_none() {
+            if on_name && self.marquee.is_none() && resp.dragged() {
                 egui::DragAndDrop::set_payload(ui.ctx(), drag);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-            } else if resp.hovered() && on_name {
+            } else if resp.hovered() && on_name && self.marquee.is_none() {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
             }
         } else {
@@ -472,7 +479,7 @@ impl EncodeApp {
             self.apply_preset_ids(&targets, pid.as_str());
         }
         let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-        if resp.clicked() && !resp.dragged() {
+        if resp.clicked() && !resp.dragged() && !self.marquee_is_active_drag() {
             self.click_select(&job.id, order, mods.0, mods.1);
             self.handle.lock(|s| s.selected = Some(job.id.clone()));
         }
@@ -585,7 +592,21 @@ impl EncodeApp {
         let targets = if self.selected_ids.len() > 1 { self.selected_ids.clone() } else { vec![job_id.to_string()] };
         let n = targets.len();
         let presets = self.handle.lock(|s| s.presets.all());
-        ui.menu_button(if n > 1 { format!("Change preset for selected ({n})") } else { "Apply preset".into() }, |ui| {
+        if ui.button(if n > 1 { format!("Remove selected ({n})") } else { "Remove".into() }).clicked() {
+            self.request_remove_selected(all);
+            ui.close();
+        }
+        if ui.button("Remove finished").clicked() {
+            self.handle.lock(|s| s.queue.remove_finished());
+            self.handle.mark_dirty();
+            ui.close();
+        }
+        if ui.button("Re-queue / reset status").clicked() {
+            self.handle.lock(|s| s.queue.reset_status(&targets));
+            self.handle.mark_dirty();
+            ui.close();
+        }
+        ui.menu_button(if n > 1 { format!("Change preset for selected ({n})") } else { "Change preset".into() }, |ui| {
             for p in &presets {
                 if ui.button(&p.name).clicked() {
                     self.apply_preset_ids(&targets, &p.id);
@@ -593,6 +614,20 @@ impl EncodeApp {
                 }
             }
         });
+        if ui.button("Duplicate").clicked() {
+            for id in &targets {
+                let _ = self.handle.lock(|s| s.queue.duplicate(id));
+            }
+            ui.close();
+        }
+        if ui.button("Reveal output").clicked() {
+            let path = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == job_id).map(|j| j.output.clone()));
+            if let Some(p) = path {
+                self.reveal_in_explorer(&p);
+            }
+            ui.close();
+        }
+        ui.separator();
         ui.menu_button("Change format", |ui| {
             for f in OutputFormat::all() {
                 if ui.button(f.label()).clicked() {
@@ -623,33 +658,6 @@ impl EncodeApp {
         if ui.button("Reset preset to Auto").clicked() {
             let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job_id.to_string()]));
             self.handle.mark_dirty();
-            ui.close();
-        }
-        if ui.button(if n > 1 { format!("Remove selected ({n})") } else { "Remove".into() }).clicked() {
-            self.request_remove_selected(all);
-            ui.close();
-        }
-        if ui.button("Remove finished").clicked() {
-            self.handle.lock(|s| s.queue.remove_finished());
-            self.handle.mark_dirty();
-            ui.close();
-        }
-        if ui.button("Re-queue / reset status").clicked() {
-            self.handle.lock(|s| s.queue.reset_status(&targets));
-            self.handle.mark_dirty();
-            ui.close();
-        }
-        if ui.button("Duplicate").clicked() {
-            for id in &targets {
-                let _ = self.handle.lock(|s| s.queue.duplicate(id));
-            }
-            ui.close();
-        }
-        if ui.button("Reveal output").clicked() {
-            let path = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == job_id).map(|j| j.output.clone()));
-            if let Some(p) = path {
-                self.reveal_in_explorer(&p);
-            }
             ui.close();
         }
         let _ = all;
@@ -855,6 +863,14 @@ impl EncodeApp {
         }
     }
 
+    fn selected_targets(&self, job_id: &str) -> Vec<String> {
+        if self.selected_ids.len() > 1 && self.selected_ids.iter().any(|id| id == job_id) {
+            self.selected_ids.clone()
+        } else {
+            vec![job_id.to_string()]
+        }
+    }
+
     fn preset_popup(&mut self, ui: &mut Ui, jobs: &[Job]) {
         let Some(job_id) = self.preset_popup_for.clone() else {
             return;
@@ -863,6 +879,7 @@ impl EncodeApp {
             self.preset_popup_for = None;
             return;
         };
+        let targets = self.selected_targets(&job_id);
         let pos = self.popup_anchor.unwrap_or(Pos2::new(200.0, 200.0));
         let mut open = true;
         let t = self.t();
@@ -894,7 +911,7 @@ impl EncodeApp {
                         }
                         let selected = p.id == job.preset.id;
                         if studio_pick_row(ui, p, selected, &t).clicked() {
-                            self.apply_preset_ids(&[job_id.clone()], &p.id);
+                            self.apply_preset_ids(&targets, &p.id);
                             self.preset_popup_for = None;
                         }
                     }
@@ -904,7 +921,7 @@ impl EncodeApp {
                         ui.label(RichText::new("Auto choice for this screen").small().color(t.text_faint));
                         let lab = format!("Auto choice for this screen: {name} ({})", pick.reason.label());
                         if ui.selectable_label(!job.preset_overridden, lab).clicked() {
-                            let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job_id.clone()]));
+                            let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&targets));
                             self.handle.mark_dirty();
                             self.preset_popup_for = None;
                         }
@@ -917,7 +934,7 @@ impl EncodeApp {
                                 continue;
                             }
                             if ui.selectable_label(false, format!("{}   {}", p.name, if p.kind == PresetKind::System { "System" } else { "User" })).clicked() {
-                                self.apply_preset_ids(&[job_id.clone()], &p.id);
+                                self.apply_preset_ids(&targets, &p.id);
                                 self.preset_popup_for = None;
                             }
                         }
@@ -927,7 +944,7 @@ impl EncodeApp {
                     ui.collapsing("System Presets", |ui| {
                         for p in presets.iter().filter(|p| p.kind == PresetKind::System && !PresetLibrary::is_studio_system(&p.id)) {
                             if filter_preset(p, &q) && ui.selectable_label(p.id == job.preset.id, &p.name).clicked() {
-                                self.apply_preset_ids(&[job_id.clone()], &p.id);
+                                self.apply_preset_ids(&targets, &p.id);
                                 self.preset_popup_for = None;
                             }
                         }
@@ -935,7 +952,7 @@ impl EncodeApp {
                     ui.collapsing("User Presets & Groups", |ui| {
                         for p in presets.iter().filter(|p| p.kind == PresetKind::User) {
                             if filter_preset(p, &q) && ui.selectable_label(p.id == job.preset.id, format!("{}  {}", p.name, if p.group.is_empty() { String::new() } else { format!("· {}", p.group) })).clicked() {
-                                self.apply_preset_ids(&[job_id.clone()], &p.id);
+                                self.apply_preset_ids(&targets, &p.id);
                                 self.preset_popup_for = None;
                             }
                         }

@@ -18,6 +18,7 @@ mod probe;
 mod proc;
 mod progress;
 mod run;
+mod stream;
 
 pub use command::{
     argv_path, build_encode_plan, build_encode_plans, even, h264_level_for_frame, h264_unencodable_message, sequence_pattern, EncodePlan, PlanInput,
@@ -30,7 +31,15 @@ pub use preview::{frame_at_25, grab_preview_jpeg, letterbox_fit, preview_pixel_s
 pub use probe::{format_duration, probe, AudioStream, MediaInfo, VideoStream};
 pub use proc::{command as hidden_command, hide_window, CREATE_NO_WINDOW};
 pub use progress::{parse_progress_line, EncodeProgress};
-pub use run::{encode, encode_path, encode_with_stall, partial_output, thumbnail_png, EncodeResult, EncodeStop, DEFAULT_STALL_SECS};
+pub use run::{
+    encode, encode_path, encode_raw_from_file, encode_with_stall, feed_pass_stdin, first_stdin_plan, media_from_header, partial_output, spawn_plan,
+    thumbnail_png, wait_spawned_plan, EncodeResult, EncodeStop, SpawnedPlan, DEFAULT_STALL_SECS,
+};
+pub use stream::{
+    audio_wav_path, caps_from_help, intermediate_yuv_path, is_heavy_raster, load_sidecar, parse_stream_event, probe_cli_caps, read_exact_frame,
+    read_growing_file, serve_args, sidecar_path, stream_render_args, yuv420p_bytes_per_frame, CliCaps, RawVideoInput, StreamEvent, StreamHeader, HEAVY_ASPECT,
+    HEAVY_PIXELS,
+};
 
 use encodecraft_job::JobSource;
 use std::path::PathBuf;
@@ -58,9 +67,8 @@ pub enum FfmpegError {
     Json(#[from] serde_json::Error),
 }
 
-/// How EncodeCraft turns an EffectCraft composition into pixels: render a ProRes (or PNG) mezzanine
-/// with `effectcraft-cli`, then encode that file. Frame streaming was considered and rejected —
-/// EffectCraft already has a renderer, and a raw-frame socket would couple the two apps.
+/// Fallback argv: ProRes/PNG mezzanine when the installed EffectCraft CLI is too old to stream
+/// `yuv420p`. New CLIs use [`stream_render_args`] / the warm `serve` process instead.
 pub fn effectcraft_render_args(cli: &std::path::Path, source: &JobSource, mezzanine_out: &std::path::Path) -> Result<Vec<String>, FfmpegError> {
     match source {
         JobSource::EffectCraft { project, comp, mezzanine, work_area, .. } => {

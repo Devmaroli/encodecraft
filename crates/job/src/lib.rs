@@ -212,9 +212,10 @@ pub enum JobSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sequence_start: Option<u32>,
     },
-    /// An EffectCraft composition. EncodeCraft renders a high-quality mezzanine through
-    /// `effectcraft-cli render`, then encodes that with FFmpeg to the delivery preset.
-    /// This is the Adobe Media Encoder analogue: AE does not pre-encode H.264; AME does.
+    /// An EffectCraft composition. EncodeCraft streams `yuv420p` from `effectcraft-cli`
+    /// (warm `serve` when the CLI supports it) into FFmpeg, or falls back to a ProRes
+    /// mezzanine on older CLIs. This is the Adobe Media Encoder analogue: AE does not
+    /// pre-encode H.264; AME does.
     EffectCraft {
         project: PathBuf,
         /// Composition name or id. Omit to use EffectCraft's active / first comp.

@@ -6,12 +6,14 @@
 
 mod demo;
 mod drops;
+mod ecserve;
 mod fsutil;
 mod ipc;
 mod paths;
 mod persist;
 mod preview;
 mod stage;
+mod streamjob;
 mod tasks;
 mod token;
 mod watch;
@@ -65,6 +67,7 @@ pub struct Handle {
     dirty: Arc<AtomicBool>,
     rev: Arc<AtomicU64>,
     io: Arc<Mutex<Option<tasks::IoHub>>>,
+    pub(crate) serve: crate::ecserve::ServePool,
 }
 
 impl Clone for Handle {
@@ -77,6 +80,7 @@ impl Clone for Handle {
             dirty: Arc::clone(&self.dirty),
             rev: Arc::clone(&self.rev),
             io: Arc::clone(&self.io),
+            serve: self.serve.clone(),
         }
     }
 }
@@ -100,6 +104,7 @@ impl Handle {
             dirty: Arc::new(AtomicBool::new(false)),
             rev: Arc::new(AtomicU64::new(1)),
             io: Arc::new(Mutex::new(None)),
+            serve: crate::ecserve::ServePool::new(),
         })
     }
 
@@ -279,6 +284,7 @@ impl Handle {
     pub fn shutdown(&self) {
         self.alive.store(false, Ordering::SeqCst);
         self.stop_all();
+        self.serve.quit();
         self.persist();
         if let Ok(g) = self.ipc_port.lock() {
             if let Some(port) = *g {
@@ -1087,6 +1093,7 @@ mod tests {
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
         assert!(!h.lock(|s| s.settings.gpu_encode), "GPU encode must start off");
+        assert!(h.lock(|s| s.settings.gpu_render), "GPU render (EffectCraft) must start on");
         h.lock(|s| s.settings.gpu_encode = true);
         h.persist();
         drop(h);

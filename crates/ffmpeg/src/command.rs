@@ -6,6 +6,7 @@ use encodecraft_job::{ScaleMode, Trim};
 use encodecraft_presets::{mbps_to_kbps, ExportPreset, FrameRate, OutputFormat, Quality};
 
 use super::probe::MediaInfo;
+use super::stream::RawVideoInput;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodePlan {
@@ -14,6 +15,8 @@ pub struct EncodePlan {
     /// x264 2-pass stats prefix; delete `prefix-0.log` (+ `.mbtree`) when the job finishes.
     pub passlogfile: Option<PathBuf>,
     pub pass: u8,
+    /// When true, FFmpeg reads raw video from stdin (`pipe:0`). Do not pass `-nostdin`.
+    pub stdin: bool,
 }
 
 impl EncodePlan {
@@ -128,44 +131,77 @@ pub struct PlanInput<'a> {
     pub media: Option<&'a MediaInfo>,
     /// First-frame number when `source` is a numbered still sequence.
     pub sequence_start: Option<u32>,
+    /// Raw yuv420p (or rgb) instead of a container file. `from_stdin` uses `pipe:0`.
+    pub raw: Option<RawVideoInput>,
+    /// Optional WAV from EffectCraft `--audio-out` (Approval Res).
+    pub audio: Option<&'a Path>,
 }
 
 pub fn build_encode_plan(input: PlanInput<'_>) -> EncodePlan {
     let output = input.output.clone();
-    build_encode_plans(input).pop().unwrap_or(EncodePlan { args: Vec::new(), output, passlogfile: None, pass: 0 })
+    build_encode_plans(input).pop().unwrap_or(EncodePlan { args: Vec::new(), output, passlogfile: None, pass: 0, stdin: false })
 }
 
 fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: Option<&Path>) -> EncodePlan {
     let p = input.preset;
-    let mut args: Vec<String> = vec!["-hide_banner".into(), "-y".into(), "-nostdin".into(), "-progress".into(), "pipe:1".into(), "-nostats".into()];
+    let stdin = input.raw.as_ref().is_some_and(|r| r.from_stdin) && pass != Some(2);
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-y".into()];
+    if !stdin {
+        args.push("-nostdin".into());
+    }
+    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into()]);
 
-    if input.trim.in_sec > 0.001 {
+    if input.trim.in_sec > 0.001 && input.raw.is_none() {
         args.push("-ss".into());
         args.push(format_secs(input.trim.in_sec));
     }
-    let mut input_path = input.source.to_path_buf();
-    if let Some(start) = input.sequence_start {
-        if let Some((pattern, _, _)) = sequence_pattern(input.source) {
-            args.push("-framerate".into());
-            let fps = match input.preset.video.frame_rate {
-                FrameRate::Custom(f) if f > 0.0 => f,
-                _ => 30.0,
-            };
-            args.push(format!("{fps}"));
-            args.push("-start_number".into());
-            args.push(start.to_string());
-            input_path = pattern;
+    if let Some(raw) = &input.raw {
+        args.extend([
+            "-f".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            raw.pix_fmt.clone(),
+            "-s:v".into(),
+            format!("{}x{}", raw.width, raw.height),
+            "-r".into(),
+            format!("{}", raw.fps),
+            "-i".into(),
+            if stdin { "pipe:0".into() } else { argv_path(input.source) },
+        ]);
+    } else {
+        let mut input_path = input.source.to_path_buf();
+        if let Some(start) = input.sequence_start {
+            if let Some((pattern, _, _)) = sequence_pattern(input.source) {
+                args.push("-framerate".into());
+                let fps = match input.preset.video.frame_rate {
+                    FrameRate::Custom(f) if f > 0.0 => f,
+                    _ => 30.0,
+                };
+                args.push(format!("{fps}"));
+                args.push("-start_number".into());
+                args.push(start.to_string());
+                input_path = pattern;
+            }
+        }
+        args.push("-i".into());
+        args.push(argv_path(&input_path));
+    }
+    let want_audio = !matches!(pass, Some(1)) && p.audio.enabled && p.format.ffmpeg_audio_codec().is_some() && p.format.has_video();
+    if let Some(wav) = input.audio {
+        if want_audio && wav.is_file() {
+            args.push("-i".into());
+            args.push(argv_path(wav));
         }
     }
-    args.push("-i".into());
-    args.push(argv_path(&input_path));
     if let Some(dur) = input.trim.duration_sec(input.media.and_then(|m| m.duration_sec)) {
-        args.push("-t".into());
-        args.push(format_secs(dur));
+        if input.raw.is_none() {
+            args.push("-t".into());
+            args.push(format_secs(dur));
+        }
     }
 
-    let src_w = input.media.map(|m| m.width()).filter(|w| *w > 0);
-    let src_h = input.media.map(|m| m.height()).filter(|h| *h > 0);
+    let src_w = input.raw.as_ref().map(|r| r.width).or_else(|| input.media.map(|m| m.width()).filter(|w| *w > 0));
+    let src_h = input.raw.as_ref().map(|r| r.height).or_else(|| input.media.map(|m| m.height()).filter(|h| *h > 0));
     // Match source / studio presets keep the source raster. Never invent a 1920×1080 letterbox
     // unless the preset or a screen size actually set width/height.
     let dst_w = p.video.width.filter(|n| *n > 0).or(src_w);
@@ -208,6 +244,9 @@ fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: 
         args.push("-an".into());
     } else if p.format.ffmpeg_audio_codec().is_some() && p.audio.enabled && p.format.has_video() {
         audio_encode(&mut args, p);
+        if input.raw.is_some() && input.audio.is_some_and(|w| w.is_file()) {
+            args.extend(["-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(), "-shortest".into()]);
+        }
     } else if p.format.is_audio_only() {
         audio_encode(&mut args, p);
     } else {
@@ -223,10 +262,10 @@ fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: 
         args.push("-f".into());
         args.push("null".into());
         args.push(null_sink().into());
-        EncodePlan { args, output: PathBuf::from(null_sink()), passlogfile: passlogfile.map(Path::to_path_buf), pass: 1 }
+        EncodePlan { args, output: PathBuf::from(null_sink()), passlogfile: passlogfile.map(Path::to_path_buf), pass: 1, stdin }
     } else {
         args.push(argv_path(&input.output));
-        EncodePlan { args, output: input.output.clone(), passlogfile: passlogfile.map(Path::to_path_buf), pass: pass.unwrap_or(0) }
+        EncodePlan { args, output: input.output.clone(), passlogfile: passlogfile.map(Path::to_path_buf), pass: pass.unwrap_or(0), stdin }
     }
 }
 
@@ -513,6 +552,8 @@ mod tests {
             trim: Trim { in_sec: 1.5, out_sec: Some(9.0) },
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         })
     }
 
@@ -588,6 +629,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         assert!(join(&plan).contains("frame_%06d.png"));
         assert!(join(&plan).contains("-c:v png"));
@@ -605,15 +648,16 @@ mod tests {
         let lib = PresetLibrary::new();
         let mut p = lib.get("system.h264-mp4").unwrap();
         p.video = VideoSettings { quality: Quality::bitrate(5000), width: Some(1920), height: Some(1080), ..p.video };
-        let plan =
-            build_encode_plan(PlanInput {
-                source: Path::new("in.mp4"),
-                output: PathBuf::from("out.mp4"),
-                preset: &p,
-                trim: Trim::default(),
-                media: None,
-                sequence_start: None,
-            });
+        let plan = build_encode_plan(PlanInput {
+            source: Path::new("in.mp4"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+            raw: None,
+            audio: None,
+        });
         assert!(join(&plan).contains("-b:v 5000k"));
         assert!(!join(&plan).contains("-crf"));
     }
@@ -637,6 +681,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         let i = plan.args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(plan.args[i + 1], "./-evil.mov");
@@ -654,6 +700,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: Some(7),
+            raw: None,
+            audio: None,
         });
         let s = join(&plan);
         assert!(s.contains("-framerate"));
@@ -678,6 +726,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         assert_eq!(plans.len(), 2);
         let p1 = plans[0].args.join(" ");
@@ -705,6 +755,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         })
         .args
         .join(" ");
@@ -725,6 +777,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         })
         .args
         .join(" ");
@@ -735,14 +789,7 @@ mod tests {
             path: PathBuf::from("in.mp4"),
             duration_sec: Some(10.0),
             format_name: "mp4".into(),
-            video: Some(VideoStream {
-                width: 1080,
-                height: 1080,
-                fps: Some(25.0),
-                codec: "prores".into(),
-                pix_fmt: "yuv422p10le".into(),
-                bit_rate_bps: None,
-            }),
+            video: Some(VideoStream { width: 1080, height: 1080, fps: Some(25.0), codec: "prores".into(), pix_fmt: "yuv422p10le".into(), bit_rate_bps: None }),
             audio: None,
             ..MediaInfo::default()
         };
@@ -753,6 +800,8 @@ mod tests {
             trim: Trim::default(),
             media: Some(&media),
             sequence_start: None,
+            raw: None,
+            audio: None,
         })
         .args
         .join(" ");
@@ -771,6 +820,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         assert_eq!(plans.len(), 1, "Sultan is VBR 1-pass");
         let s = plans[0].args.join(" ");
@@ -793,6 +844,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         let s = plans.last().unwrap().args.join(" ");
         assert!(s.contains("-c:a aac"), "{s}");
@@ -816,6 +869,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         });
         assert_eq!(plans.len(), 1);
         let s = plans[0].args.join(" ");
@@ -857,6 +912,8 @@ mod tests {
             trim: Trim::default(),
             media: None,
             sequence_start: None,
+            raw: None,
+            audio: None,
         })
         .args
         .join(" ");
@@ -866,5 +923,71 @@ mod tests {
         p.video.height = Some(32000);
         let msg = h264_unencodable_message(&p, 32000, 32000).unwrap();
         assert!(msg.contains("H.264 cannot encode"));
+    }
+
+    #[test]
+    fn raw_pipe_keeps_true_two_pass() {
+        let lib = PresetLibrary::new();
+        let mut p = lib.get("system.better-res").unwrap();
+        p.video.width = Some(6880);
+        p.video.height = Some(1032);
+        let raw = crate::RawVideoInput { width: 6880, height: 1032, fps: 25.0, pix_fmt: "yuv420p".into(), from_stdin: true };
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("clip.yuv"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+            raw: Some(raw),
+            audio: None,
+        });
+        assert_eq!(plans.len(), 2, "Better Res stays 2-pass");
+        assert!(plans[0].stdin);
+        assert!(!plans[1].stdin, "pass 2 reads the raw file, not stdin");
+        let p1 = plans[0].args.join(" ");
+        assert!(p1.contains("-f rawvideo"));
+        assert!(p1.contains("yuv420p"));
+        assert!(p1.contains("6880x1032"));
+        assert!(p1.contains("pipe:0"));
+        assert!(p1.contains("-pass 1"));
+        assert!(!p1.contains("-nostdin"));
+        assert!(p1.contains("-b:v 6200k"));
+        let p2 = plans[1].args.join(" ");
+        assert!(p2.contains("-pass 2"));
+        assert!(!p2.contains("pipe:0"));
+        assert!(p2.contains("-nostdin"));
+    }
+
+    #[test]
+    fn approval_res_muxes_wav_on_pass_2_only() {
+        let dir = std::env::temp_dir().join(format!("ec-wav-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let wav = dir.join("audio.wav");
+        std::fs::write(&wav, b"RIFF....WAVEfmt ").unwrap();
+        let lib = PresetLibrary::new();
+        let mut p = lib.get("system.approval-res").unwrap();
+        p.video.width = Some(1920);
+        p.video.height = Some(1080);
+        let raw = crate::RawVideoInput { width: 1920, height: 1080, fps: 25.0, pix_fmt: "yuv420p".into(), from_stdin: true };
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("clip.yuv"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+            raw: Some(raw),
+            audio: Some(&wav),
+        });
+        assert_eq!(plans.len(), 2, "Approval Res stays 2-pass");
+        let p1 = plans[0].args.join(" ");
+        assert!(p1.contains("-an"), "{p1}");
+        assert!(!p1.contains("1:a:0"), "{p1}");
+        let p2 = plans[1].args.join(" ");
+        assert!(p2.contains("-map"), "{p2}");
+        assert!(p2.contains("1:a:0"), "{p2}");
+        assert!(p2.contains("320k") || p2.contains("-b:a"), "{p2}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

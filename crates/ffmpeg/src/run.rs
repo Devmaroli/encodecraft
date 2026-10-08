@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 
 #[cfg(test)]
 use std::process::Command;
@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::command::{build_encode_plan, build_encode_plans, h264_unencodable_message, inject_hrd_cbr, PlanInput};
-use super::probe::{self, MediaInfo};
+use super::probe::{self, AudioStream, MediaInfo, VideoStream};
 use super::progress::{parse_progress_line, EncodeProgress};
+use super::stream::{RawVideoInput, StreamHeader};
 use super::{Ffmpeg, FfmpegError};
 use encodecraft_job::Trim;
 use encodecraft_presets::ExportPreset;
@@ -87,7 +88,7 @@ pub fn encode_with_stall(
         return Err(FfmpegError::Message(msg));
     }
 
-    let plans = build_encode_plans(PlanInput { source, output: tmp_out.clone(), preset, trim, media, sequence_start });
+    let plans = build_encode_plans(PlanInput { source, output: tmp_out.clone(), preset, trim, media, sequence_start, raw: None, audio: None });
     let n_passes = plans.len().max(1);
     let duration = trim.duration_sec(media.and_then(|m| m.duration_sec)).or_else(|| media.and_then(|m| m.duration_sec));
     let mut log = String::new();
@@ -126,8 +127,22 @@ pub fn encode_with_stall(
     replace_file(&tmp_out, &final_out)?;
     cleanup_passlog(stats.as_deref());
 
-    let (measured_video_kbps, min_bitrate_warning, extra) =
-        enforce_min_bitrate(ff, source, &final_out, preset, trim, media, sequence_start, stall_secs, stop, &mut progress, &mut on_progress, &mut on_log)?;
+    let (measured_video_kbps, min_bitrate_warning, extra) = enforce_min_bitrate(
+        ff,
+        source,
+        &final_out,
+        preset,
+        trim,
+        media,
+        sequence_start,
+        None,
+        None,
+        stall_secs,
+        stop,
+        &mut progress,
+        &mut on_progress,
+        &mut on_log,
+    )?;
     log.push_str(&extra);
 
     progress.done = true;
@@ -145,6 +160,8 @@ fn enforce_min_bitrate(
     trim: Trim,
     media: Option<&MediaInfo>,
     sequence_start: Option<u32>,
+    raw: Option<RawVideoInput>,
+    audio: Option<&Path>,
     stall_secs: u64,
     stop: &EncodeStop,
     progress: &mut EncodeProgress,
@@ -176,7 +193,7 @@ fn enforce_min_bitrate(
         floor.video.quality = encodecraft_presets::Quality::Vbr2Pass { target_mbps: cbr, max_mbps: cbr, min_mbps: Some(cbr), two_pass: false };
     }
     let tmp = partial_output(final_out);
-    let mut plan = build_encode_plan(PlanInput { source, output: tmp.clone(), preset: &floor, trim, media, sequence_start });
+    let mut plan = build_encode_plan(PlanInput { source, output: tmp.clone(), preset: &floor, trim, media, sequence_start, raw, audio });
     if !floor.video.use_nvenc {
         inject_hrd_cbr(&mut plan.args);
     }
@@ -493,6 +510,265 @@ pub fn encode_path(
     encode(ff, source, output, preset, trim, media.as_ref(), stop, on_progress, on_log)
 }
 
+pub fn media_from_header(header: &StreamHeader, path: &Path) -> MediaInfo {
+    MediaInfo {
+        path: path.to_path_buf(),
+        duration_sec: header.duration_sec(),
+        format_name: "rawvideo".into(),
+        bit_rate_bps: None,
+        size_bytes: None,
+        video: Some(VideoStream {
+            width: header.width,
+            height: header.height,
+            fps: Some(header.ffmpeg_fps()),
+            codec: "rawvideo".into(),
+            pix_fmt: header.pix_fmt().into(),
+            bit_rate_bps: None,
+        }),
+        audio: if header.audio {
+            Some(AudioStream { codec: "pcm_s16le".into(), sample_rate: header.sample_rate, channels: header.audio_channels, bit_rate_bps: None })
+        } else {
+            None
+        },
+    }
+}
+
+/// FFmpeg process whose stdin receives raw frames (x264 pass 1, or a 1-pass encode).
+pub struct SpawnedPlan {
+    child: ChildGuard,
+    rx: std::sync::mpsc::Receiver<Msg>,
+    pub log: String,
+    pub progress: EncodeProgress,
+    pass_i: usize,
+    n_passes: usize,
+    duration: Option<f64>,
+    stall_secs: u64,
+}
+
+impl SpawnedPlan {
+    pub fn stdin(&mut self) -> Option<ChildStdin> {
+        self.child.child.as_mut().and_then(|c| c.stdin.take())
+    }
+}
+
+pub fn spawn_plan(
+    ff: &Ffmpeg,
+    plan: &super::command::EncodePlan,
+    duration: Option<f64>,
+    stall_secs: u64,
+    pass_i: usize,
+    n_passes: usize,
+) -> Result<SpawnedPlan, FfmpegError> {
+    let child = super::proc::command(&ff.ffmpeg).args(&plan.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            FfmpegError::Missing
+        } else {
+            FfmpegError::Io(e)
+        }
+    })?;
+    let mut guard = ChildGuard { child: Some(child) };
+    let stdout = guard.stdout();
+    let stderr = guard.stderr();
+    let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+    if let Some(out) = stdout {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(out).lines() {
+                match line {
+                    Ok(l) => {
+                        if tx.send(Msg::Out(l)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    if let Some(err) = stderr {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(err).lines() {
+                match line {
+                    Ok(l) => {
+                        if tx.send(Msg::Err(l)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    drop(tx);
+    Ok(SpawnedPlan {
+        child: guard,
+        rx,
+        log: String::new(),
+        progress: EncodeProgress {
+            stage: if n_passes > 1 { format!("Encoding pass {}/{}", pass_i + 1, n_passes) } else { "Encoding".into() },
+            ..EncodeProgress::default()
+        },
+        pass_i,
+        n_passes,
+        duration,
+        stall_secs,
+    })
+}
+
+pub fn feed_pass_stdin(stdin: &mut ChildStdin, frame: &[u8]) -> Result<(), FfmpegError> {
+    stdin.write_all(frame).map_err(FfmpegError::Io)?;
+    Ok(())
+}
+
+pub fn wait_spawned_plan(
+    spawned: &mut SpawnedPlan,
+    stop: &EncodeStop,
+    mut on_progress: impl FnMut(&EncodeProgress),
+    mut on_log: impl FnMut(&str),
+) -> Result<(), FfmpegError> {
+    let mut cancelled = false;
+    let mut stalled = false;
+    let stall_for = Duration::from_secs(spawned.stall_secs.max(15));
+    let mut last_activity = Instant::now();
+    loop {
+        if stop.is_requested() {
+            cancelled = true;
+            spawned.child.kill();
+            break;
+        }
+        match spawned.rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Msg::Out(line)) => {
+                last_activity = Instant::now();
+                if parse_progress_line(&line, &mut spawned.progress, spawned.duration) {
+                    on_progress(&scale_progress(&spawned.progress, spawned.pass_i, spawned.n_passes));
+                }
+            }
+            Ok(Msg::Err(line)) => {
+                last_activity = Instant::now();
+                if !line.is_empty() {
+                    spawned.log.push_str(&line);
+                    spawned.log.push('\n');
+                    on_log(&line);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if last_activity.elapsed() > stall_for {
+                    stalled = true;
+                    spawned.child.kill();
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let status = spawned.child.wait()?;
+    if cancelled || stop.is_requested() {
+        return Err(FfmpegError::Message("stopped".into()));
+    }
+    if stalled {
+        return Err(FfmpegError::Message(format!("ffmpeg stalled (no output for {}s)", stall_for.as_secs())));
+    }
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return Err(FfmpegError::Encode { status: code, stderr: tail(&spawned.log, 4000) });
+    }
+    Ok(())
+}
+
+/// Pass 2 (and 1-pass file encodes) from a finished raw yuv file + optional WAV.
+pub fn encode_raw_from_file(
+    ff: &Ffmpeg,
+    yuv: &Path,
+    output: PathBuf,
+    preset: &ExportPreset,
+    header: &StreamHeader,
+    audio: Option<&Path>,
+    stdin_pass: bool,
+    stop: &EncodeStop,
+    stall_secs: u64,
+    mut on_progress: impl FnMut(&EncodeProgress),
+    mut on_log: impl FnMut(&str),
+) -> Result<EncodeResult, FfmpegError> {
+    if !yuv.is_file() {
+        return Err(FfmpegError::Message(format!("raw source is missing: {}", yuv.display())));
+    }
+    let final_out = output;
+    let tmp_out = partial_output(&final_out);
+    if let Some(parent) = tmp_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let media = media_from_header(header, yuv);
+    let raw = RawVideoInput::from_header(header, stdin_pass);
+    let w = preset.video.width.filter(|n| *n > 0).unwrap_or(header.width);
+    let h = preset.video.height.filter(|n| *n > 0).unwrap_or(header.height);
+    if let Some(msg) = h264_unencodable_message(preset, w, h) {
+        return Err(FfmpegError::Message(msg));
+    }
+    let plans = build_encode_plans(PlanInput {
+        source: yuv,
+        output: tmp_out.clone(),
+        preset,
+        trim: Trim::default(),
+        media: Some(&media),
+        sequence_start: None,
+        raw: Some(raw),
+        audio,
+    });
+    let n_passes = plans.len().max(1);
+    let duration = header.duration_sec();
+    let mut log = String::new();
+    let mut progress = EncodeProgress::default();
+    let stats = plans.iter().find_map(|p| p.passlogfile.clone());
+    for (i, plan) in plans.iter().enumerate() {
+        if stdin_pass && plan.stdin && i == 0 {
+            continue;
+        }
+        on_log(&plan.display_cmdline(&ff.ffmpeg));
+        progress.stage = if n_passes > 1 { format!("Encoding pass {}/{}", i + 1, n_passes) } else { "Encoding".into() };
+        match run_one_plan(ff, plan, duration, stall_secs, stop, &mut progress, &mut log, &mut on_progress, &mut on_log, i, n_passes) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = remove_partial(&tmp_out);
+                cleanup_passlog(stats.as_deref());
+                return Err(e);
+            }
+        }
+    }
+    if let Some(parent) = final_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    replace_file(&tmp_out, &final_out)?;
+    cleanup_passlog(stats.as_deref());
+    let filler_raw = Some(RawVideoInput::from_header(header, false));
+    let (measured_video_kbps, min_bitrate_warning, extra) = enforce_min_bitrate(
+        ff,
+        yuv,
+        &final_out,
+        preset,
+        Trim::default(),
+        Some(&media),
+        None,
+        filler_raw,
+        audio,
+        stall_secs,
+        stop,
+        &mut progress,
+        &mut on_progress,
+        &mut on_log,
+    )?;
+    log.push_str(&extra);
+    progress.done = true;
+    progress.percent = 100.0;
+    on_progress(&progress);
+    Ok(EncodeResult { output: final_out, log, progress, measured_video_kbps, min_bitrate_warning })
+}
+
+/// First 2-pass plan with stdin rawvideo, or the only plan for 1-pass.
+pub fn first_stdin_plan<'a>(plans: &'a [super::command::EncodePlan]) -> Option<(usize, &'a super::command::EncodePlan)> {
+    plans.iter().enumerate().find(|(_, p)| p.stdin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +857,62 @@ mod tests {
 
     fn unix_nanos() -> u128 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    }
+
+    #[test]
+    fn first_stdin_plan_is_pass_one() {
+        let lib = encodecraft_presets::PresetLibrary::new();
+        let mut p = lib.get("system.better-res").unwrap();
+        p.video.width = Some(6880);
+        p.video.height = Some(1032);
+        let raw = RawVideoInput { width: 6880, height: 1032, fps: 25.0, pix_fmt: "yuv420p".into(), from_stdin: true };
+        let plans = build_encode_plans(PlanInput {
+            source: Path::new("clip.yuv"),
+            output: PathBuf::from("out.mp4"),
+            preset: &p,
+            trim: Trim::default(),
+            media: None,
+            sequence_start: None,
+            raw: Some(raw),
+            audio: None,
+        });
+        let (i, plan) = first_stdin_plan(&plans).expect("stdin pass");
+        assert_eq!(i, 0);
+        assert!(plan.stdin);
+        assert_eq!(plan.pass, 1);
+    }
+
+    #[test]
+    fn encode_raw_yuv_two_pass_better_res() {
+        let Ok(ff) = crate::find_ffmpeg() else {
+            eprintln!("skip: ffmpeg not on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ec-rawyuv-{}-{}", std::process::id(), unix_nanos()));
+        let _ = std::fs::create_dir_all(&dir);
+        let w = 16u32;
+        let h = 16u32;
+        let frames = 8u64;
+        let bpf = crate::yuv420p_bytes_per_frame(w, h);
+        let mut raw = vec![0u8; (bpf * frames) as usize];
+        for f in 0..frames {
+            let off = (f * bpf) as usize;
+            raw[off..off + (w * h) as usize].fill((40 + f * 20) as u8);
+        }
+        let yuv = dir.join("clip.yuv");
+        std::fs::write(&yuv, &raw).unwrap();
+        let header = StreamHeader { version: 1, width: w, height: h, fps: 25.0, frames, pix_fmt: "yuv420p".into(), bytes_per_frame: bpf, ..Default::default() };
+        let lib = encodecraft_presets::PresetLibrary::new();
+        let mut preset = lib.get("system.better-res").unwrap();
+        preset.video.width = Some(w);
+        preset.video.height = Some(h);
+        let out = dir.join("out.mp4");
+        let started = Instant::now();
+        let result = encode_raw_from_file(&ff, &yuv, out.clone(), &preset, &header, None, false, &EncodeStop::new(), 60, |_| {}, |_| {}).unwrap();
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!("tiny 16×16 8f Better Res 2-pass (no ProRes): {secs:.3}s");
+        assert!(result.output.is_file() && result.output.metadata().map(|m| m.len() > 0).unwrap_or(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// lavfi → each studio preset on a near-static slide and a busy testsrc; ffprobe average ≥ min.

@@ -1,8 +1,10 @@
-# Speed item 3 — study only (not implemented)
+# Speed item 3 — pipe streaming (implemented)
 
-Kapildev’s 6880×1032 / 10 s Better Res job spent most of its time in two places: EffectCraft writing a ProRes HQ mezzanine (~555 Mbps), then x264 `medium` pass 1 (~32 fps) and pass 2 (~21 fps) on an RTX 3070 Ti / 24-thread PC.
+Kapildev’s 6880×1032 / 10 s Better Res job spent most of its time in two places: EffectCraft writing a ProRes HQ mezzanine (~555 Mbps), then x264 `medium` pass 1 (~32 fps) and pass 2 (~21 fps) on an RTX 3070 Ti / 24-thread PC. Office-PC **before** wall time: **~84 s**.
 
-This note is the study he asked for before any of those changes. **Nothing here is wired into the encoder.** The shipping work on this branch is presets + min bitrate, queue selection, no auto-start, exact comp names, hidden consoles, the full-job progress bar, and the NVENC / GPU encode toggle.
+**Now wired:** `yuv420p` pipe from EffectCraft into x264 pass 1 while writing a raw file for pass 2 (true 2-pass, studio bitrates unchanged — Better Res stays 2-pass 2/6.2/6.2). Warm `effectcraft-cli serve`, GPU compositor on by default with CPU fallback, at most one ultra-wide / 4K+ job at a time, ProRes mezzanine if the CLI is too old. Adaptive parallel and x264 thread/lookahead tuning are still not implemented.
+
+The rest of this note is the original study.
 
 ## What was requested
 
@@ -38,10 +40,15 @@ Office-PC **before** (this branch, ProRes HQ mezzanine then x264 medium):
 | 6880×1032, 10 s, Better Res 2-pass | ProRes HQ ~555 Mbps (bar sat at 0% until this finished) | ~32 fps | ~21 fps | RTX 3070 Ti, 24 threads |
 | 1920×1080 (same preset) | not measured on that PC | — | — | control not captured yet |
 
-**After** pipe / cheaper intermediate / adaptive parallel / x264 thread tune: **not measured** — those levers are still study-only on this branch. NVENC is shipped as an opt-in and will not match x264 quality; no office-PC NVENC timing yet.
+**After** (this branch, EncodeCraft side of EffectCraft PR #11):
 
-Re-measure both rasters on the same installer after the later EffectCraft streaming contract is wired.
+| Lever | Status |
+| --- | --- |
+| `yuv420p` stream into x264 pass 1 + raw file for pass 2 | Wired. Better Res stays **2-pass** 2/6.2/6.2. |
+| Warm `effectcraft-cli serve` | On demand, reused, `--idle-exit 120`, `app.quit` on EncodeCraft exit, `CREATE_NO_WINDOW`. |
+| GPU render | On by default; CLI CPU fallback; Settings checkbox; `ENCODECRAFT_GPU_RENDER=0`. NVENC stays a separate Off switch. |
+| One ultra-wide / 4K+ job at a time | Dispatch skips a second heavy raster. Other jobs still run in parallel. |
+| Old CLI | ProRes mezzanine fallback. |
+| Adaptive parallel / x264 thread tune | Still not implemented. |
 
-## Decision needed
-
-Leave pipe streaming, intermediate format, adaptive parallel jobs, and x264 tuning unimplemented until he picks a lever from the table above.
+Office-PC **after** wall time for 6880×1032 / 10 s Better Res: **not remeasured here** (this VM has no EffectCraft project or RTX). Expected win vs **84 s** is dropping the ProRes HQ write/read and overlapping pass 1 with the render. Re-run that clip on the office installer to fill the after number.

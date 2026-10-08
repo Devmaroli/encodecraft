@@ -979,6 +979,15 @@ impl EncodeApp {
                 .small()
                 .color(self.t().text_dim),
         );
+        if ui.checkbox(&mut s.gpu_render, "GPU render (EffectCraft compositor)").changed() {
+            self.handle.lock(|sess| sess.settings.gpu_render = s.gpu_render);
+            self.handle.mark_dirty();
+        }
+        ui.label(
+            RichText::new("On by default. EffectCraft uses the GPU when an adapter can take the frame, otherwise CPU. Separate from GPU encode (NVENC).")
+                .small()
+                .color(self.t().text_dim),
+        );
         ui.add_space(8.0);
         ui.label(RichText::new("Encoding preview").strong());
         let mut preview = s.show_encode_preview;

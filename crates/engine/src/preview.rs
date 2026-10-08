@@ -65,7 +65,10 @@ fn collect_targets(jobs: &[Job]) -> Vec<PreviewTarget> {
             let name = j.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| j.source.display_name());
             let source = match &j.source {
                 JobSource::File { path, .. } => path.clone(),
-                JobSource::EffectCraft { mezzanine, .. } => mezzanine_path(&paths::work_dir(), &j.id, mezzanine),
+                JobSource::EffectCraft { mezzanine, .. } => {
+                    // Raw `.yuv` is not a container; the stream worker already pushes Y-plane JPEGs.
+                    mezzanine_path(&paths::work_dir(), &j.id, mezzanine)
+                }
             };
             let out_w = j.preset.video.width.unwrap_or(0);
             let out_h = j.preset.video.height.unwrap_or(0);
@@ -120,15 +123,7 @@ fn grab_one(h: &Handle, ff: &encodecraft_ffmpeg::Ffmpeg, t: &PreviewTarget) {
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let hgt = rgba.height();
-    h.emit_ui(UiEvent::PreviewFrame {
-        id: t.id.clone(),
-        name: t.name.clone(),
-        rgba: rgba.into_raw(),
-        w,
-        h: hgt,
-        output_w: t.out_w,
-        output_h: t.out_h,
-    });
+    h.emit_ui(UiEvent::PreviewFrame { id: t.id.clone(), name: t.name.clone(), rgba: rgba.into_raw(), w, h: hgt, output_w: t.out_w, output_h: t.out_h });
 }
 
 #[cfg(test)]

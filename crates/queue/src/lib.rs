@@ -153,6 +153,40 @@ impl Job {
         Self { log: String::new(), ..self.clone() }
     }
 
+    pub fn raster(&self) -> (u32, u32) {
+        let from_source = match &self.source {
+            encodecraft_job::JobSource::EffectCraft { width, height, .. } => (*width, *height),
+            encodecraft_job::JobSource::File { .. } => (None, None),
+        };
+        let w = self
+            .preset
+            .video
+            .width
+            .filter(|n| *n > 0)
+            .or_else(|| self.screen.as_ref().map(|s| s.width).filter(|n| *n > 0))
+            .or_else(|| from_source.0.filter(|n| *n > 0))
+            .unwrap_or(0);
+        let h = self
+            .preset
+            .video
+            .height
+            .filter(|n| *n > 0)
+            .or_else(|| self.screen.as_ref().map(|s| s.height).filter(|n| *n > 0))
+            .or_else(|| from_source.1.filter(|n| *n > 0))
+            .unwrap_or(0);
+        (w, h)
+    }
+
+    /// Ultra-wide (>5:1) or 4K+ frames — at most one of these encodes at a time.
+    /// Unknown-size EffectCraft comps are treated as heavy so two ultra-wides cannot sneak through.
+    pub fn is_heavy_raster(&self) -> bool {
+        let (w, h) = self.raster();
+        if w < 2 || h < 2 {
+            return self.source.is_effectcraft();
+        }
+        encodecraft_ffmpeg::is_heavy_raster(w, h)
+    }
+
     /// Fill match-source dimensions and rebuild `{width}x{height}` once the real size is known.
     /// Returns true if the output path changed.
     pub fn apply_resolved_size(&mut self, width: u32, height: u32, allow_overwrite: bool) -> bool {
@@ -749,6 +783,53 @@ mod tests {
         assert_eq!(q.jobs[4].status, JobStatus::Waiting);
         q.remove(&dup).unwrap();
         assert_eq!(q.jobs.len(), 4);
+    }
+
+    #[test]
+    fn heavy_raster_blocks_second_ultrawide() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        q.enqueue(&req_many(), &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        q.jobs[0].preset.video.width = Some(6880);
+        q.jobs[0].preset.video.height = Some(1032);
+        q.jobs[1].preset.video.width = Some(6880);
+        q.jobs[1].preset.video.height = Some(1032);
+        q.jobs[2].preset.video.width = Some(1920);
+        q.jobs[2].preset.video.height = Some(1080);
+        q.jobs[0].status = JobStatus::Encoding;
+        assert!(q.jobs[0].is_heavy_raster());
+        assert!(q.jobs[1].is_heavy_raster());
+        assert!(!q.jobs[2].is_heavy_raster());
+        let heavy_busy = q.jobs.iter().any(|j| j.status.is_active() && j.is_heavy_raster());
+        let next = q.jobs.iter().find(|j| j.status == JobStatus::Waiting && !(heavy_busy && j.is_heavy_raster())).map(|j| j.id.clone());
+        assert_eq!(next.as_deref(), Some(q.jobs[2].id.as_str()));
+    }
+
+    #[test]
+    fn effectcraft_source_size_marks_ultrawide_heavy() {
+        let lib = PresetLibrary::new();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: PathBuf::from("/p/spot.ecproj"),
+                comp: Some("Main".into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(6880),
+                height: Some(1032),
+            },
+            preset_id: "system.better-res".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from("/out")),
+            naming: None,
+            sizes: Vec::new(),
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        let jobs = EncodeQueue::expand(&req, &lib, std::path::Path::new("/out"), "{comp}", false, true).unwrap();
+        assert_eq!(jobs[0].raster(), (6880, 1032));
+        assert!(jobs[0].is_heavy_raster());
     }
 
     #[test]

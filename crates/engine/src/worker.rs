@@ -28,9 +28,9 @@ pub fn run(h: Handle) {
 }
 
 fn dispatch(h: &Handle) {
-    let (running, max, waiting) = h.lock(|s| {
+    let (running, max) = h.lock(|s| {
         s.queue.max_parallel = s.settings.max_parallel.max(1);
-        (s.queue.running, s.queue.max_parallel, s.queue.next_waiting())
+        (s.queue.running, s.queue.max_parallel)
     });
     if !running {
         return;
@@ -39,6 +39,26 @@ fn dispatch(h: &Handle) {
     if active >= max {
         return;
     }
+    let heavy_busy = h.lock(|s| s.queue.jobs.iter().any(|j| j.status.is_active() && j.is_heavy_raster()));
+    let serve_busy = h.serve.rendering();
+    let waiting = h.lock(|s| {
+        s.queue
+            .jobs
+            .iter()
+            .find(|j| {
+                if j.status != JobStatus::Waiting {
+                    return false;
+                }
+                if heavy_busy && j.is_heavy_raster() {
+                    return false;
+                }
+                if serve_busy && j.source.is_effectcraft() && j.is_heavy_raster() {
+                    return false;
+                }
+                true
+            })
+            .map(|j| j.id.clone())
+    });
     let Some(id) = waiting else {
         return;
     };
@@ -115,6 +135,37 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let mapper = Arc::new(JobProgress::for_job(has_render, n_passes, &stage::load()));
     let clock = Arc::new(Mutex::new(StageClock::new(mapper.labels.len())));
     let started_ms = job.started_ms.unwrap_or_else(unix_ms);
+    let stall = h.lock(|s| s.settings.stall_timeout_sec).max(15);
+
+    if has_render {
+        match crate::streamjob::try_stream(h, &job, &ff, &preset, &stop, Arc::clone(&mapper), started_ms, stall, &h.serve) {
+            Ok(Some(result)) => {
+                if let Ok(mut c) = clock.lock() {
+                    c.finish();
+                    stage::record(has_render, n_passes, c.samples());
+                }
+                h.lock(|s| {
+                    if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
+                        j.measured_bitrate_kbps = result.measured_video_kbps;
+                        if let Some(kbps) = result.measured_video_kbps {
+                            s.push_log(format!("{}: average {:.2} Mbps", id, kbps / 1000.0));
+                        }
+                        if result.min_bitrate_warning {
+                            s.push_log(format!("{}: finished under the preset minimum bitrate", id));
+                        }
+                    }
+                });
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                if e.to_string() == "stopped" {
+                    return Err(e);
+                }
+                h.lock(|s| s.push_log(format!("{}: stream encode failed ({e}) — ProRes mezzanine fallback", id)));
+            }
+        }
+    }
 
     let source_file = resolve_source(h, &job, &stop, Arc::clone(&mapper), Arc::clone(&clock), started_ms)?;
     let media = probe(&ff, &source_file).ok();
@@ -144,7 +195,6 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let h_prog = h.clone();
     let h_log = h.clone();
     let last_prog = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-    let stall = h.lock(|s| s.settings.stall_timeout_sec).max(15);
     let sequence_start = match &job.source {
         JobSource::File { sequence_start, .. } => *sequence_start,
         JobSource::EffectCraft { .. } => None,

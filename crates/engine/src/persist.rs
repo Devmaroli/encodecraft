@@ -48,6 +48,9 @@ pub struct Settings {
     /// Master switch: when on, H.264 presets with `allow_gpu` use NVIDIA NVENC.
     #[serde(default)]
     pub gpu_encode: bool,
+    /// EffectCraft compositor GPU. On by default; the CLI falls back to CPU. Separate from NVENC.
+    #[serde(default = "default_true")]
+    pub gpu_render: bool,
 }
 
 fn default_true() -> bool {
@@ -87,6 +90,7 @@ impl Default for Settings {
             recent_preset_ids: Vec::new(),
             show_encode_preview: true,
             gpu_encode: false,
+            gpu_render: true,
         }
     }
 }

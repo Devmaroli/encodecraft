@@ -6,16 +6,19 @@ instead of encoding inside AE. EncodeCraft offers the same split:
 1. EffectCraft owns the composition and the renderer.
 2. EncodeCraft owns delivery presets, DOOH screen packs, the queue, watch folders, FFmpeg.
 
-**Do not stream frames.** EffectCraft already exports H.264 / ProRes / PNG / … through
-`effectcraft-cli render`. Streaming a raw frame socket would duplicate that pipeline and couple
-the two processes. The handoff is a small JSON job (crate `encodecraft-job`).
+The handoff is a small JSON job (crate `encodecraft-job`). EncodeCraft then **streams `yuv420p`
+frames** from `effectcraft-cli` into FFmpeg (warm `serve` when the CLI is new enough). True x264
+2-pass is kept: pass 1 reads the live pipe while a raw file is written for pass 2. If the installed
+CLI is too old for `yuv420p` / `serve`, EncodeCraft falls back to `render --format prores --out FILE`.
+
+Contract: [`render-streaming-contract.md`](render-streaming-contract.md).
 
 Two source kinds:
 
 | `source.kind` | When to use |
 |---------------|-------------|
 | `file` | You already rendered a mezzanine (or the item is footage). Fastest. |
-| `effectcraft` | Send the `.ecproj` + comp name. EncodeCraft calls `effectcraft-cli render --format prores` then FFmpeg. Closest to AME. |
+| `effectcraft` | Send the `.ecproj` + comp name. EncodeCraft streams frames (or ProRes fallback) then FFmpeg. |
 
 ## 1. Depend on the job crate
 
@@ -79,9 +82,11 @@ Headless encoder (CI / no GUI):
 encodecraft-cli serve --port 9878 --start
 ```
 
-## 4. Render progress (so the EncodeCraft bar moves during the mezzanine)
+## 4. Render progress (so the EncodeCraft bar moves from the first frame)
 
-While EncodeCraft runs `effectcraft-cli render`, it reads stdout/stderr and looks for a **machine-readable** progress line. Print one of these per frame (or every few frames):
+Streaming CLIs emit `{"event":"frame","n":1,"total":250}` on stderr (or the serve socket) as soon as the first frame is written. EncodeCraft folds that into the same job bar as x264 pass 1 and pass 2, and the live preview shows the Y plane of each streamed frame.
+
+The ProRes fallback still reads stdout/stderr and looks for a **machine-readable** progress line:
 
 ```text
 {"event":"frame","n":12,"total":250}

@@ -151,6 +151,8 @@ fn print_cmd(args: &[String]) -> Result<(), String> {
         trim: encodecraft_job::Trim::default(),
         media: None,
         sequence_start: None,
+        raw: None,
+        audio: None,
     });
     let ff = find_ffmpeg().map(|f| f.ffmpeg).unwrap_or_else(|_| PathBuf::from("ffmpeg"));
     for (i, plan) in plans.iter().enumerate() {

@@ -948,6 +948,7 @@ impl EncodeApp {
         if self.show_about {
             egui::Window::new("About EncodeCraft").collapsible(false).resizable(false).open(&mut self.show_about).show(ctx, |ui| {
                 ui.label(RichText::new("EncodeCraft").heading());
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                 ui.label("A Media Encoder-style companion to EffectCraft.");
                 ui.label("Queue · presets · DOOH screen sizes · watch folders · EffectCraft handoff.");
                 ui.label("Independent project; not affiliated with Adobe or ArtCraft.");

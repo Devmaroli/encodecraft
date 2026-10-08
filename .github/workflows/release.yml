@@ -1,5 +1,5 @@
 # Build EncodeCraft-Setup-x64.exe and EncodeCraft-Portable-x64.zip on a version tag.
-# Push a tag such as v0.2.0 to GitHub (https://github.com/Devmaroli/encodecraft).
+# Push a tag such as v0.3.0 to GitHub (https://github.com/Devmaroli/encodecraft).
 
 name: Release
 
@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: dist/cache
-          key: ffmpeg-windows-essentials
+          key: ffmpeg-windows-essentials-${{ runner.os }}
 
       - name: Install NSIS
         run: choco install nsis -y --no-progress
@@ -62,8 +62,14 @@ jobs:
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          generate_release_notes: false
+          fail_on_unmatched_files: true
           files: |
             dist/EncodeCraft-Setup-x64.exe
             dist/EncodeCraft-Portable-x64.zip
             dist/SHA256SUMS
+          body: |
+            Studio presets with Auto Better Res and Installation for listed screens.
+            One-off Approval Res and Sultan.
+            Live encoding preview, dockable workspaces, and a faster queue.
+            Windows installer and portable zip include FFmpeg.

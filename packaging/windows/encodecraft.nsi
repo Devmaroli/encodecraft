@@ -1,12 +1,12 @@
 ; EncodeCraft per-user installer (no admin). Built with NSIS 3.
-; Pass /DPRODUCT_VERSION=0.2.0 /DOUTFILE=... /DPAYLOAD=... /DICO=...
+; Pass /DPRODUCT_VERSION=0.3.0 /DOUTFILE=... /DPAYLOAD=... /DICO=...
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "x64.nsh"
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.2.0"
+  !define PRODUCT_VERSION "0.3.0"
 !endif
 !ifndef PRODUCT_VERSION_NSIS
   !define PRODUCT_VERSION_NSIS "${PRODUCT_VERSION}.0"

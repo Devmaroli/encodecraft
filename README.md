@@ -1,6 +1,6 @@
 # EncodeCraft
 
-A desktop **encode queue** in the spirit of Adobe Media Encoder, written in Rust as a companion to [EffectCraft](https://github.com/storytold/effectcraft) (the open-source After Effects clone). Same family of choices: Cargo workspace, engine crates under the UI, native **egui / eframe**, MIT OR Apache-2.0, no Adobe assets. Current release: **v0.2.0**.
+A desktop **encode queue** in the spirit of Adobe Media Encoder, written in Rust as a companion to [EffectCraft](https://github.com/storytold/effectcraft) (the open-source After Effects clone). Same family of choices: Cargo workspace, engine crates under the UI, native **egui / eframe**, MIT OR Apache-2.0, no Adobe assets. Current release: **v0.3.0**.
 
 EncodeCraft is an independent project. It is not affiliated with Adobe or with the ArtCraft / Crafting Apps team.
 
@@ -17,7 +17,7 @@ apps/encodecraft-cli    encode / enqueue / serve
 
 EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to the FFmpeg binary on purpose: a delivery queue needs every codec FFmpeg already has, including hardware you trust. FFmpeg is never linked (GPL-safe). If it is missing, the UI shows install instructions instead of crashing.
 
-## Features (v0.2)
+## Features (v0.3)
 
 - Encode **queue**: add (picker + drag-and-drop), drag rows to change render order (ghost + insertion line, multi-select, source groups stay together, encoding/done rows locked), Up/Down or Alt+↑↓, Undo (Ctrl+Z), start / pause / stop, **Render N at once**
 - **Presets**: H.264 MP4, studio **Better Res** (7/8 Mbps), **Installation** (5/6 Mbps), **Approval Res** (1/1.2 Mbps with AAC), **Sultan** (2/3 Mbps, no audio); one-off presets are not remembered as a manual choice. Also H.265/HEVC MP4, ProRes MOV, WebM VP9, animated GIF, PNG/JPEG sequences, AAC / WAV / MP3 — create, edit, import, export
@@ -51,7 +51,7 @@ Both include `ffmpeg.exe` / `ffprobe.exe`. SmartScreen: More info → Run anyway
 
 To rebuild from Linux: `./scripts/package-windows.sh` (needs `nsis` / `makensis`) or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
 
-A version tag (`v0.2.0`) on the GitHub mirror runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and attaches both files plus `SHA256SUMS`.
+A version tag (`v0.3.0`) on https://github.com/Devmaroli/encodecraft runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and attaches both files plus `SHA256SUMS`.
 
 The Windows `.exe` and window icon is **Frame E in Electric Cobalt** (`assets/app-icon/encodecraft.ico` and `encodecraft-256.png`). Source pack: [`assets/app-icon/frame-e-electric-cobalt/`](assets/app-icon/frame-e-electric-cobalt/).
 

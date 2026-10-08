@@ -34,6 +34,26 @@ mkdir -p "$CACHE"
 log() { printf '==> %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+run_python() {
+  if have python3; then
+    python3 "$@"
+  elif have python; then
+    python "$@"
+  else
+    echo "python3/python not found" >&2
+    exit 1
+  fi
+}
+
+# GitHub-hosted windows-latest + Git Bash: NSIS wants D:\... not /d/...
+native_path() {
+  if is_windows && have cygpath; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 is_windows() {
   case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) return 0 ;;
@@ -127,7 +147,7 @@ download_ffmpeg() {
   if have unzip; then
     unzip -q -o "$zip" -d "$unpack"
   else
-    python3 - "$zip" "$unpack" <<'PY'
+    run_python - "$zip" "$unpack" <<'PY'
 import sys, zipfile
 zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
 PY
@@ -210,13 +230,14 @@ build_installer() {
   rm -f "$out"
   log "NSIS $nsis → $out"
   # Debian makensis wants -D; Windows makensis accepts /D.
+  # On GitHub windows-latest, convert Git Bash paths so File /r finds the payload.
   "$nsis" \
     -DPRODUCT_VERSION="$VERSION" \
     -DPRODUCT_VERSION_NSIS="$NSIS_VER" \
-    "-DOUTFILE=$out" \
-    "-DPAYLOAD=$STAGE" \
-    "-DICO=$ROOT/assets/app-icon/encodecraft.ico" \
-    "$ROOT/packaging/windows/encodecraft.nsi"
+    "-DOUTFILE=$(native_path "$out")" \
+    "-DPAYLOAD=$(native_path "$STAGE")" \
+    "-DICO=$(native_path "$ROOT/assets/app-icon/encodecraft.ico")" \
+    "$(native_path "$ROOT/packaging/windows/encodecraft.nsi")"
   if [[ ! -f "$out" ]]; then
     echo "NSIS did not write $out" >&2
     exit 1
@@ -236,12 +257,13 @@ build_portable() {
     if have zip; then
       zip -r -9 "$PORTABLE_ZIP" "$(basename "$PORTABLE_DIR")"
     else
-      python3 - "$PORTABLE_ZIP" "$(basename "$PORTABLE_DIR")" <<'PY'
+      run_python - "$PORTABLE_ZIP" "$(basename "$PORTABLE_DIR")" <<'PY'
 import sys, zipfile, pathlib
 out, folder = sys.argv[1], pathlib.Path(sys.argv[2])
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for p in folder.rglob("*"):
-        z.write(p, p.as_posix())
+        if p.is_file():
+            z.write(p, p.as_posix())
 PY
     fi
   )
@@ -254,7 +276,7 @@ write_checksums() {
   if have sha256sum; then
     (cd "$ROOT/dist" && sha256sum "$SETUP_NAME" "$PORTABLE_ZIP" > SHA256SUMS)
   else
-    python3 - "$setup" "$zipf" "$sums" <<'PY'
+    run_python - "$setup" "$zipf" "$sums" <<'PY'
 import hashlib, pathlib, sys
 lines = []
 for p in sys.argv[1:3]:

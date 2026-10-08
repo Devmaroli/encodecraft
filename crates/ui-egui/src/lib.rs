@@ -984,9 +984,11 @@ impl EncodeApp {
             self.handle.mark_dirty();
         }
         ui.label(
-            RichText::new("On by default. EffectCraft uses the GPU when an adapter can take the frame, otherwise CPU. Separate from GPU encode (NVENC).")
-                .small()
-                .color(self.t().text_dim),
+            RichText::new(
+                "On by default when an NVIDIA GPU is present. EffectCraft still falls back to CPU if the frame does not fit. Non-RTX adapters were slower than CPU — leave this off unless you want to try them. Separate from GPU encode (NVENC). ENCODECRAFT_GPU_RENDER=0/1 overrides.",
+            )
+            .small()
+            .color(self.t().text_dim),
         );
         ui.add_space(8.0);
         ui.label(RichText::new("Encoding preview").strong());

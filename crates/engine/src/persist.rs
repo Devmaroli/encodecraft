@@ -48,13 +48,17 @@ pub struct Settings {
     /// Master switch: when on, H.264 presets with `allow_gpu` use NVIDIA NVENC.
     #[serde(default)]
     pub gpu_encode: bool,
-    /// EffectCraft compositor GPU. On by default; the CLI falls back to CPU. Separate from NVENC.
-    #[serde(default = "default_true")]
+    /// EffectCraft compositor GPU. Defaults on when an NVIDIA GPU is present; the CLI still
+    /// falls back to CPU. Separate from NVENC.
+    #[serde(default = "default_gpu_render")]
     pub gpu_render: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_gpu_render() -> bool {
+    encodecraft_ffmpeg::nvidia_gpu_present()
 }
 fn default_parallel() -> usize {
     2
@@ -90,7 +94,7 @@ impl Default for Settings {
             recent_preset_ids: Vec::new(),
             show_encode_preview: true,
             gpu_encode: false,
-            gpu_render: true,
+            gpu_render: default_gpu_render(),
         }
     }
 }

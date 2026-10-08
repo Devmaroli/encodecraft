@@ -24,16 +24,18 @@ use crate::stage::JobProgress;
 use crate::tasks::UiEvent;
 use crate::{EngineError, Handle};
 
-pub fn gpu_render_from(env: Option<&str>, settings_on: bool) -> bool {
+/// Request EffectCraft `--gpu` only when an NVIDIA GPU is present (non-RTX adapters were slower
+/// than CPU). `ENCODECRAFT_GPU_RENDER=1` forces it; `=0` turns it off. The checkbox is the rest.
+pub fn gpu_render_from(env: Option<&str>, settings_on: bool, nvidia: bool) -> bool {
     match env.map(str::trim) {
         Some("0") | Some("false") | Some("off") | Some("no") => false,
         Some("1") | Some("true") | Some("on") | Some("yes") => true,
-        _ => settings_on,
+        _ => settings_on && nvidia,
     }
 }
 
 pub fn gpu_render_enabled(settings_on: bool) -> bool {
-    gpu_render_from(std::env::var("ENCODECRAFT_GPU_RENDER").ok().as_deref(), settings_on)
+    gpu_render_from(std::env::var("ENCODECRAFT_GPU_RENDER").ok().as_deref(), settings_on, encodecraft_ffmpeg::nvidia_gpu_present())
 }
 
 pub fn job_wants_audio(preset: &ExportPreset) -> bool {
@@ -218,7 +220,11 @@ pub fn try_stream(
         h.lock(|s| s.push_log(format!("{}: EffectCraft CLI has no yuv420p stream — ProRes mezzanine fallback", job.id)));
         return Ok(None);
     }
-    let gpu = gpu_render_enabled(h.lock(|s| s.settings.gpu_render));
+    let settings_gpu = h.lock(|s| s.settings.gpu_render);
+    let gpu = gpu_render_enabled(settings_gpu);
+    if settings_gpu && !gpu {
+        h.lock(|s| s.push_log(format!("{}: GPU render not requested (no NVIDIA; CPU is typically faster). ENCODECRAFT_GPU_RENDER=1 to force", job.id)));
+    }
     let work = paths::work_dir();
     std::fs::create_dir_all(&work)?;
     let yuv = intermediate_yuv_path(&work, &job.id);
@@ -318,6 +324,7 @@ fn stream_via_cold(
     });
     apply_render_progress(h, &job.id, mapper, started_ms, 0, header.frames);
 
+    let audio = if header.audio { audio } else { None };
     let tmp = partial_output(&job.output);
     let mut pass1 = match start_pass1(ff, preset, &header, yuv, audio, tmp, stall) {
         Ok(p) => p,
@@ -461,7 +468,8 @@ fn stream_via_serve(
                     s.push_log(format!("{}: {}×{} via warm serve", job.id, hd.width, hd.height));
                 });
                 apply_render_progress(h, &job.id, mapper, started_ms, 0, hd.frames);
-                match start_pass1(ff, preset, &hd, yuv, audio, partial_output(&job.output), stall) {
+                let wav = if hd.audio { audio } else { None };
+                match start_pass1(ff, preset, &hd, yuv, wav, partial_output(&job.output), stall) {
                     Ok(p) => pass1 = Some(p),
                     Err(e) => {
                         fail = Some(e.to_string());
@@ -476,7 +484,8 @@ fn stream_via_serve(
                     header = load_sidecar(sidecar);
                     if let Some(hd) = header.as_ref() {
                         if pass1.is_none() {
-                            match start_pass1(ff, preset, hd, yuv, audio, partial_output(&job.output), stall) {
+                            let wav = if hd.audio { audio } else { None };
+                            match start_pass1(ff, preset, hd, yuv, wav, partial_output(&job.output), stall) {
                                 Ok(p) => pass1 = Some(p),
                                 Err(e) => {
                                     fail = Some(e.to_string());
@@ -530,6 +539,7 @@ fn stream_via_serve(
         wait_pass1(h, job, mapper, &mut p1, stop)?;
     }
     let header = header.or_else(|| load_sidecar(sidecar)).ok_or_else(|| EngineError::Message("no stream header".into()))?;
+    let audio = if header.audio { audio } else { None };
     finish_encode(h, job, ff, preset, &header, yuv, audio, stop, stall, mapper)
 }
 
@@ -539,13 +549,13 @@ mod tests {
 
     #[test]
     fn gpu_render_env_overrides_settings() {
-        assert!(gpu_render_from(None, true));
-        assert!(!gpu_render_from(None, false));
-        assert!(!gpu_render_from(Some("0"), true));
-        assert!(!gpu_render_from(Some("off"), true));
-        assert!(gpu_render_from(Some("1"), false));
-        assert!(gpu_render_from(Some("on"), false));
-        assert!(gpu_render_enabled(true));
+        assert!(gpu_render_from(None, true, true));
+        assert!(!gpu_render_from(None, true, false), "non-NVIDIA adapters stay on CPU");
+        assert!(!gpu_render_from(None, false, true));
+        assert!(!gpu_render_from(Some("0"), true, true));
+        assert!(!gpu_render_from(Some("off"), true, true));
+        assert!(gpu_render_from(Some("1"), false, false), "env forces GPU even without NVIDIA");
+        assert!(gpu_render_from(Some("on"), false, false));
         assert!(!gpu_render_enabled(false));
     }
 

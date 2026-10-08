@@ -46,7 +46,7 @@ Office-PC **before** (this branch, ProRes HQ mezzanine then x264 medium):
 | --- | --- |
 | `yuv420p` stream into x264 pass 1 + raw file for pass 2 | Wired. Better Res stays **2-pass** 2/6.2/6.2. |
 | Warm `effectcraft-cli serve` | On demand, reused, `--idle-exit 120`, `app.quit` on EncodeCraft exit, `CREATE_NO_WINDOW`. |
-| GPU render | On by default; CLI CPU fallback; Settings checkbox; `ENCODECRAFT_GPU_RENDER=0`. NVENC stays a separate Off switch. |
+| GPU render | On by default **when NVIDIA is present**; otherwise CPU (non-RTX adapters were slower). CLI still CPU-fallbacks if the frame does not fit. Settings checkbox; `ENCODECRAFT_GPU_RENDER=0/1`. NVENC stays a separate Off switch. This VM has no GPU and no `effectcraft-cli`, so GPU vs CPU was not measured here. |
 | One ultra-wide / 4K+ job at a time | Dispatch skips a second heavy raster. Other jobs still run in parallel. |
 | Old CLI | ProRes mezzanine fallback. |
 | Adaptive parallel / x264 thread tune | Still not implemented. |

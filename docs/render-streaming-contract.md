@@ -1,7 +1,7 @@
 # EncodeCraft ↔ EffectCraft render streaming
 
-Contract version **1**, copied from EffectCraft `docs/render-streaming.md`
-(PR #11, branch `cursor/render-stream-serve-5c0e`). EncodeCraft builds against this file.
+Contract version **1**. Canonical copy in the EffectCraft repo: `docs/render-streaming.md` on
+branch `cursor/render-stream-serve-5c0e` (PR #11). EncodeCraft builds against this file.
 
 The encoded-file fallback `effectcraft-cli render --format prores --out FILE` is unchanged.
 
@@ -24,7 +24,8 @@ are the bytes you will receive. There is **no** length prefix; each frame is exa
 bytes. `fps` is a JSON number (25, 23.976, …).
 
 `--out -` or `--out stdout` writes frames to stdout. `--out PATH` writes a file, a POSIX FIFO, or
-an existing Windows named pipe. Flush after every frame.
+an existing Windows named pipe (`OpenOptions` write, no truncate on non-files). Flush after every
+frame.
 
 ## CLI: streaming render
 
@@ -40,8 +41,10 @@ effectcraft-cli render --project F.ecproj [--comp NAME] --format yuv420p|rgb24|r
 - `--audio-out FILE` writes a complete WAV (PCM 16-bit little-endian stereo 48 kHz unless the
   output module says otherwise) for muxing (Approval Res). `--audio-out -` writes WAV to stdout;
   that cannot be combined with video on stdout.
+- `--audio-only` with `--out FILE|-` writes only the WAV (no video).
 - `--gpu` uses the GPU compositor when an adapter exists **and** the frame fits a 6 GiB working
-  set. Otherwise the CPU, with a `gpu` event. `--gpu` never fails the job for a missing adapter.
+  set (8 GB RTX 3070 Ti at 6880×1032 is in budget). Otherwise the CPU, with a `gpu` event.
+  `--gpu` never fails the job for a missing adapter.
 - Progress: `{"event":"frame","n":1,"total":250,"elapsed":0.04}` on stderr from the first written
   frame (`n` is 1-based).
 - `--no-window` is accepted and ignored; the **parent** must set `CREATE_NO_WINDOW`.
@@ -52,6 +55,8 @@ effectcraft-cli render --project F.ecproj [--comp NAME] --format yuv420p|rgb24|r
 effectcraft-cli render --project F.ecproj --comp NAME --format prores --prores hq --out FILE.mov
 ```
 
+This still writes a movie file. It now also emits `header` and `frame` JSON lines on stderr.
+
 ## CLI: warm server
 
 ```text
@@ -59,16 +64,17 @@ effectcraft-cli serve --control PORT [--idle-exit SECONDS] [--gpu] [--project F.
 ```
 
 - Bind **`127.0.0.1` only**. `--control 0` picks an ephemeral port.
-- On start, stderr gets
+- On start, stderr (and only stderr) gets
   `{"event":"listening","host":"127.0.0.1","port":N,"pid":P,"gpu":bool,"idleExit":S}`.
 - `--idle-exit` (default **120**; `0` = never) exits 0 when no render is running and no client has
-  spoken for that many seconds. `app.quit` / `server.shutdown` exits promptly.
+  spoken for that many seconds. `app.quit` / `server.shutdown` exits promptly. EncodeCraft should
+  send `app.quit` when it exits so the child does not linger.
 - One render at a time. Projects stay loaded: `project.open` of the same path is a no-op.
 
 ### Transport
 
-TCP, one JSON object per line, 4 MiB max line. Unsolicited events have `"event"` and no `"id"`.
-Replies echo `"id"` when the request had one.
+Same shape as the desktop control channel: TCP, one JSON object per line, 4 MiB max line.
+Unsolicited events have `"event"` and no `"id"`. Replies echo `"id"` when the request had one.
 
 Request: `{"id":1,"method":"render.start","params":{...}}`
 
@@ -79,7 +85,7 @@ Reply: `{"id":1,"ok":true,"result":{...}}` or `{"id":1,"ok":false,"error":"..."}
 | Method | Params | Result |
 |---|---|---|
 | `hello` / `server.info` | `{}` | `{version, gpuRequested, gpu, project, rendering}` |
-| `project.open` | `{path}` | `{path, reopened}` |
+| `project.open` | `{path}` | `{path, reopened}` — skipped if already that file |
 | `project.close` | `{}` | empty project |
 | `render.start` | see below | blocking; events on the **same** connection; final `result` is the `done` object |
 | `render.cancel` | `{}` | `{cancelling}` — another connection may call this during `render.start` |
@@ -106,6 +112,13 @@ Reply: `{"id":1,"ok":true,"result":{...}}` or `{"id":1,"ok":false,"error":"..."}
 }
 ```
 
+`out` / `audioOut` / `sidecar` are paths or `"-"`. `pixFmt` accepts `yuv420p` / `rgb24` / `rgba` /
+`raw`. `format: "wav"` with `audioOnly: true` is the audio-only path. The server may also `file.open`
+the `project` path when it is not already loaded.
+
+While `render.start` runs, the same connection receives header/frame/done (or cancelled) events as
+plain JSON lines, then the matching `ok` reply.
+
 ## Events (stderr and serve)
 
 ```json
@@ -125,14 +138,25 @@ Reply: `{"id":1,"ok":true,"result":{...}}` or `{"id":1,"ok":false,"error":"..."}
 `header.audio` is whether the comp has an audible mix (EncodeCraft can skip WAV). Video streams
 never contain audio.
 
+## FFmpeg (video from the pipe)
+
+```text
+effectcraft-cli render --project F.ecproj --format yuv420p --out - --gpu --sidecar hdr.json
+ffmpeg -f rawvideo -pix_fmt yuv420p -s:v 6880x1032 -r 25 -i pipe:0 ...
+```
+
+Read `width`, `height`, `fps`, `pixFmt` from the header event or sidecar **before** configuring
+FFmpeg, or start FFmpeg after the header line (the first video byte follows the header event, not
+stdout).
+
 ## Suggested EncodeCraft flow
 
 1. Start once: `effectcraft-cli serve --control 0 --gpu --idle-exit 120` with `CREATE_NO_WINDOW`.
 2. Parse `listening.port` from stderr.
 3. `project.open` the `.ecproj`.
-4. `render.start` with `out` a path FFmpeg can follow, `pixFmt: "yuv420p"`, optional `audioOut`.
-5. Show `frame.n / frame.total` from the first event. Stream into x264 pass 1 while keeping the
-   raw file for pass 2 (true 2-pass, studio bitrates unchanged).
+4. `render.start` with `out` a path (or a pipe FFmpeg already has open), `pixFmt: "yuv420p"`, optional `audioOut`.
+5. Show `frame.n / frame.total` from the first event. Stream into x264 **pass 1** while writing a
+   cheap raw file for **pass 2** (true 2-pass; studio bitrates unchanged).
 6. `render.cancel` on user stop; `app.quit` when EncodeCraft exits.
 
 Cold `render --format yuv420p --out -` is the same contract without a resident process. ProRes-to-file

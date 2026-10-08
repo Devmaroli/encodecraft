@@ -1093,7 +1093,8 @@ mod tests {
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
         assert!(!h.lock(|s| s.settings.gpu_encode), "GPU encode must start off");
-        assert!(h.lock(|s| s.settings.gpu_render), "GPU render (EffectCraft) must start on");
+        let nvidia = encodecraft_ffmpeg::nvidia_gpu_present();
+        assert_eq!(h.lock(|s| s.settings.gpu_render), nvidia, "GPU render defaults on only when NVIDIA is present");
         h.lock(|s| s.settings.gpu_encode = true);
         h.persist();
         drop(h);

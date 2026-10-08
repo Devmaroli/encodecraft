@@ -25,9 +25,22 @@ NVENC is **not** part of this hold: it shipped as an opt-in (toolbar GPU encode 
 
 ## What this branch already does for speed-adjacent work
 
-- Full-job progress bar covers “Rendering comp” then encode pass 1/2 with one ETA.
+- Full-job progress bar covers “Rendering comp” (frame N/total + duration-weighted bar from the first render tick) then encode pass 1/2 with one ETA.
 - Optional NVIDIA NVENC (same VBR min/target/max, `multipass fullres` when the preset is 2-pass). Off by default. Quality is not identical to x264; it is opt-in.
 - Hidden child processes (no CMD flashes) so the UI stays usable while measuring.
+
+## Timings (6880×1032 10 s Better Res, and 1920×1080)
+
+Office-PC **before** (this branch, ProRes HQ mezzanine then x264 medium):
+
+| Case | EffectCraft mezzanine | x264 pass 1 | x264 pass 2 | Notes |
+| --- | --- | --- | --- | --- |
+| 6880×1032, 10 s, Better Res 2-pass | ProRes HQ ~555 Mbps (bar sat at 0% until this finished) | ~32 fps | ~21 fps | RTX 3070 Ti, 24 threads |
+| 1920×1080 (same preset) | not measured on that PC | — | — | control not captured yet |
+
+**After** pipe / cheaper intermediate / adaptive parallel / x264 thread tune: **not measured** — those levers are still study-only on this branch. NVENC is shipped as an opt-in and will not match x264 quality; no office-PC NVENC timing yet.
+
+Re-measure both rasters on the same installer after the later EffectCraft streaming contract is wired.
 
 ## Decision needed
 

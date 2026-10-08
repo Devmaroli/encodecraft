@@ -567,6 +567,9 @@ impl EncodeApp {
             ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
             if job.status == JobStatus::Encoding && !job.progress.stage.is_empty() {
                 ui.label(RichText::new(&job.progress.stage).size(10.0).color(t.text_dim));
+                if job.progress.stage.starts_with("Rendering comp") && job.progress.frame > 0 && job.progress.total_frames > 0 {
+                    ui.label(RichText::new(format!("{}/{}", job.progress.frame, job.progress.total_frames)).size(10.0).color(t.text_dim));
+                }
             }
             if let Some(enc) = job.encoder_used.as_deref() {
                 ui.label(RichText::new(enc).size(10.0).color(if enc == "GPU" { t.cache_green } else { t.text_dim }));

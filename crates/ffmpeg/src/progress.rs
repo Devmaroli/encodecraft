@@ -13,6 +13,14 @@ pub struct EncodeProgress {
     pub bitrate_kbps: Option<f32>,
     /// Human stage label (`Encoding pass 1/2`). Empty = encode.
     pub stage: String,
+    /// 0-based encode pass. Worker maps this through duration weights.
+    pub pass_index: usize,
+    /// 1 for a single encode, 2 for x264 2-pass.
+    pub pass_count: usize,
+    /// 0..=100 of the current pass (before weighting across passes).
+    pub pass_percent: f32,
+    /// Known frame count for the current stage (EffectCraft render). 0 = unknown.
+    pub total_frames: u64,
 }
 
 impl EncodeProgress {

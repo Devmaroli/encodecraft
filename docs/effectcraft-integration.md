@@ -79,7 +79,19 @@ Headless encoder (CI / no GUI):
 encodecraft-cli serve --port 9878 --start
 ```
 
-## 4. curl smoke test
+## 4. Render progress (so the EncodeCraft bar moves during the mezzanine)
+
+While EncodeCraft runs `effectcraft-cli render`, it reads stdout/stderr and looks for a **machine-readable** progress line. Print one of these per frame (or every few frames):
+
+```text
+{"event":"frame","n":12,"total":250}
+```
+
+Also accepted: `progress=0.4`, `percent=40`, `Rendering frame 12 of 250`, `frame=12 total=250`, `12/250`.
+
+If the CLI prints nothing matching that, EncodeCraft still eases the bar forward from measured stage durations so it does not sit at 0% until FFmpeg starts. Frame N/total is what makes the row say **Rendering comp 12/250**.
+
+## 5. curl smoke test
 
 ```sh
 # Linux/macOS:
@@ -92,14 +104,14 @@ curl -sS -X POST http://127.0.0.1:9878/v1/enqueue \
   -d '{"schema":1,"source":{"kind":"file","path":"/abs/hero.mov"},"preset_id":"system.h264-mp4","start_queue":true}'
 ```
 
-## 5. Patch file
+## 6. Patch file
 
 [`../patches/effectcraft-send-to-encoder.patch`](../patches/effectcraft-send-to-encoder.patch)
 is a ready-to-apply unified diff against EffectCraft `main` (see the header inside for the
 revision it was written against). Line numbers in `commands.rs` / `menus.rs` drift; if `patch`
 fails, apply the `.rs` snippet by hand using the steps above.
 
-## 6. Why not `renderQueue.add` inside EffectCraft?
+## 7. Why not `renderQueue.add` inside EffectCraft?
 
 You still can — EffectCraft's own queue encodes with FilmCraft's pure-Rust codecs. Send-to-EncodeCraft
 is for **delivery variants**: many DOOH sizes, H.264/HEVC/WebM/GIF from one comp, watch folders,

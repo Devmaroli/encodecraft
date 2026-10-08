@@ -11,19 +11,20 @@ mod ipc;
 mod paths;
 mod persist;
 mod preview;
+mod stage;
 mod tasks;
 mod token;
 mod watch;
 mod worker;
 
-pub use tasks::{IoCmd, UiEvent};
+pub use demo::{seed_preset_ui_demo, seed_stress_queue};
 pub use drops::{
     classify_dropped_paths, ecproj_comp_size, ecproj_comp_size_file, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop,
 };
 pub use ipc::{default_port, post_enqueue, post_start, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, layout_path, set_home};
-pub use demo::{seed_preset_ui_demo, seed_stress_queue};
 pub use persist::Settings;
+pub use tasks::{IoCmd, UiEvent};
 pub use watch::WatchFolder;
 
 use std::collections::HashMap;
@@ -464,14 +465,7 @@ impl Session {
         let chosen: Vec<Option<String>> = if comps.is_empty() { vec![None] } else { comps.iter().cloned().map(Some).collect() };
         let mut ids = Vec::new();
         for comp in chosen {
-            let source = JobSource::EffectCraft {
-                project: project.clone(),
-                comp,
-                mezzanine: "prores".into(),
-                work_area: false,
-                width: None,
-                height: None,
-            };
+            let source = JobSource::EffectCraft { project: project.clone(), comp, mezzanine: "prores".into(), work_area: false, width: None, height: None };
             ids.extend(self.enqueue_user_source(source, preset_id)?);
         }
         if let Some(last) = ids.last() {
@@ -627,9 +621,7 @@ impl Session {
 
     pub fn snapshot_presets(&self, ids: &[String]) -> Vec<(String, encodecraft_presets::ExportPreset, bool, Option<encodecraft_presets::PresetReason>)> {
         ids.iter()
-            .filter_map(|id| {
-                self.queue.jobs.iter().find(|j| j.id == *id).map(|j| (j.id.clone(), j.preset.clone(), j.preset_overridden, j.preset_reason))
-            })
+            .filter_map(|id| self.queue.jobs.iter().find(|j| j.id == *id).map(|j| (j.id.clone(), j.preset.clone(), j.preset_overridden, j.preset_reason)))
             .collect()
     }
 
@@ -943,43 +935,94 @@ mod tests {
     #[test]
     fn production_commands_go_through_hidden_helper() {
         let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let roots = ["crates/ffmpeg/src", "crates/engine/src", "crates/ui-egui/src", "apps/encodecraft-cli/src"];
+        let roots = ["crates/ffmpeg/src", "crates/engine/src", "crates/ui-egui/src", "apps/encodecraft-cli/src", "apps/encodecraft/src"];
         let mut bare = Vec::new();
         for root in roots {
             let root = ws.join(root);
             if !root.is_dir() {
                 continue;
             }
-            fn walk(dir: &std::path::Path, bare: &mut Vec<String>) {
-                let Ok(rd) = std::fs::read_dir(dir) else { return };
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        walk(&p, bare);
-                        continue;
-                    }
-                    if p.extension().and_then(|s| s.to_str()) != Some("rs") {
-                        continue;
-                    }
-                    let Ok(src) = std::fs::read_to_string(&p) else { continue };
-                    let mut in_test = false;
-                    for (i, line) in src.lines().enumerate() {
-                        let t = line.trim();
-                        if t.starts_with("#[cfg(test)]") {
-                            in_test = true;
-                        }
-                        if in_test {
-                            continue;
-                        }
-                        if t.contains("Command::new") && !p.ends_with("proc.rs") {
-                            bare.push(format!("{}:{}: {t}", p.display(), i + 1));
-                        }
-                    }
+            walk_production_commands(&root, &mut bare);
+        }
+        assert!(bare.is_empty(), "bare Command::new in production (must use encodecraft_ffmpeg::hidden_command / proc::command):\n{}", bare.join("\n"));
+        let proc = std::fs::read_to_string(ws.join("crates/ffmpeg/src/proc.rs")).unwrap_or_default();
+        assert!(!proc.is_empty(), "proc.rs missing");
+        assert!(proc.contains("creation_flags"), "Windows CREATE_NO_WINDOW must be set in proc.rs");
+        assert!(proc.contains("0x0800_0000"), "CREATE_NO_WINDOW must be 0x08000000");
+        assert!(proc.contains("CommandExt") && proc.contains("CREATE_NO_WINDOW"));
+    }
+
+    fn walk_production_commands(dir: &std::path::Path, bare: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk_production_commands(&p, bare);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            if p.file_name().and_then(|s| s.to_str()) == Some("proc.rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&p) else { continue };
+            for (i, line) in production_lines(&src).into_iter().enumerate() {
+                if line_has_bare_command_new(&line) {
+                    bare.push(format!("{}:{}: {}", p.display(), i + 1, line.trim()));
                 }
             }
-            walk(&root, &mut bare);
         }
-        assert!(bare.is_empty(), "bare Command::new in production:\n{}", bare.join("\n"));
+    }
+
+    /// Drop `#[cfg(test)]` modules / items so a test-only `use Command` at the top of a file
+    /// does not hide production `Command::new` later in the same file.
+    fn production_lines(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut skip_depth: i32 = 0;
+        let mut pending_cfg_test = false;
+        for line in src.lines() {
+            let t = line.trim();
+            if skip_depth > 0 {
+                skip_depth += line.chars().filter(|&c| c == '{').count() as i32;
+                skip_depth -= line.chars().filter(|&c| c == '}').count() as i32;
+                if skip_depth < 0 {
+                    skip_depth = 0;
+                }
+                out.push(String::new());
+                continue;
+            }
+            if t.starts_with("#[cfg(test)]") {
+                pending_cfg_test = true;
+                out.push(String::new());
+                continue;
+            }
+            if pending_cfg_test {
+                pending_cfg_test = false;
+                if t.starts_with("mod ") {
+                    skip_depth = line.chars().filter(|&c| c == '{').count() as i32;
+                    skip_depth -= line.chars().filter(|&c| c == '}').count() as i32;
+                    if skip_depth <= 0 {
+                        skip_depth = 0;
+                    }
+                    out.push(String::new());
+                    continue;
+                }
+                // `#[cfg(test)] use ...` / `#[cfg(test)] fn ...` — skip this item only.
+                out.push(String::new());
+                continue;
+            }
+            out.push(line.to_string());
+        }
+        out
+    }
+
+    fn line_has_bare_command_new(line: &str) -> bool {
+        let t = line.trim();
+        if t.starts_with("//") || t.starts_with("///") || t.starts_with("//!") {
+            return false;
+        }
+        t.contains("Command::new") || t.contains("process::Command::new")
     }
 
     #[test]
@@ -1061,9 +1104,7 @@ mod tests {
         });
         let project = home.join("test-2.ecproj");
         std::fs::write(&project, br#"{"compositions":[{"name":"Honor 400_EN.ai Comp","width":1080,"height":1080}]}"#).unwrap();
-        let ids = h
-            .lock(|s| s.add_effectcraft_comps(project, &["Honor 400_EN.ai Comp".into()], "system.h264-mp4"))
-            .unwrap();
+        let ids = h.lock(|s| s.add_effectcraft_comps(project, &["Honor 400_EN.ai Comp".into()], "system.h264-mp4")).unwrap();
         assert_eq!(ids.len(), 1);
         h.lock(|s| {
             let name = s.queue.jobs[0].output.file_name().unwrap().to_string_lossy().into_owned();

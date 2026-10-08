@@ -17,10 +17,7 @@ pub fn default_template() -> &'static str {
 
 /// Old EncodeCraft default. EffectCraft and leftover `settings.json` still send this.
 pub fn is_legacy_default_template(template: &str) -> bool {
-    matches!(
-        template.trim(),
-        "{name}_{width}x{height}" | "{name}_{width}X{height}" | "{name}_{width}×{height}"
-    )
+    matches!(template.trim(), "{name}_{width}x{height}" | "{name}_{width}X{height}" | "{name}_{width}×{height}")
 }
 
 /// Per-request `naming` wins, except EffectCraft still sending the old EncodeCraft default.
@@ -373,6 +370,35 @@ mod tests {
         assert_eq!(effective_naming(None, "{comp}", true), "{comp}");
         assert_eq!(effective_naming(Some("{project}_{comp}"), "{comp}", true), "{project}_{comp}");
         assert_eq!(effective_naming(None, "{name}_{width}x{height}", false), "{name}_{width}x{height}");
+    }
+
+    #[test]
+    fn sanitize_keeps_mp4_comp_exactly() {
+        let name = "Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp";
+        assert_eq!(sanitize_filename(name), name, "do not strip \".mp4 Comp\" or otherwise rewrite the comp name");
+        let ctx = NamingContext::from_source(
+            &encodecraft_job::JobSource::EffectCraft {
+                project: PathBuf::from("/p/Test.ecproj"),
+                comp: Some(name.into()),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(6880),
+                height: Some(1032),
+            },
+            &dummy(),
+            6880,
+            1032,
+            "job-1",
+            1,
+            "",
+        );
+        assert_eq!(ctx.comp, name);
+        assert_eq!(apply_template("{comp}", &ctx), name);
+        assert_eq!(apply_template(default_template(), &ctx), name);
+        let p = output_path(Path::new("/out"), "{comp}", &ctx, false);
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp.mp4"));
+        assert!(!p.file_name().unwrap().to_string_lossy().contains("6880x1032"));
+        assert!(!p.file_name().unwrap().to_string_lossy().contains("Better"));
     }
 
     #[test]

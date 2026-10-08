@@ -1,8 +1,9 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use encodecraft_ffmpeg::{effectcraft_render_args, encode_with_stall, find_effectcraft_cli, find_ffmpeg_at, hidden_command, mezzanine_path, probe, EncodeStop};
 use encodecraft_job::JobSource;
@@ -11,6 +12,7 @@ use encodecraft_queue::{unix_ms, JobStatus};
 
 use crate::fsutil;
 use crate::paths;
+use crate::stage::{self, JobProgress, StageClock};
 use crate::Handle;
 
 pub fn run(h: Handle) {
@@ -110,10 +112,12 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         }
     });
     let has_render = job.source.is_effectcraft();
-    let render_weight = if has_render { 0.52_f32 } else { 0.0 };
+    let n_passes = if preset.format == OutputFormat::H264Mp4 && preset.video.quality.is_two_pass() && !preset.video.use_nvenc { 2 } else { 1 };
+    let mapper = Arc::new(JobProgress::for_job(has_render, n_passes, &stage::load()));
+    let clock = Arc::new(Mutex::new(StageClock::new(mapper.labels.len())));
     let started_ms = job.started_ms.unwrap_or_else(unix_ms);
 
-    let source_file = resolve_source(h, &job, &stop, render_weight, started_ms)?;
+    let source_file = resolve_source(h, &job, &stop, Arc::clone(&mapper), Arc::clone(&clock), started_ms)?;
     let media = probe(&ff, &source_file).ok();
     let mut job = job;
     if let Some(ref m) = media {
@@ -140,12 +144,15 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let hid = id.to_string();
     let h_prog = h.clone();
     let h_log = h.clone();
-    let last_prog = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
+    let last_prog = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
     let stall = h.lock(|s| s.settings.stall_timeout_sec).max(15);
     let sequence_start = match &job.source {
         JobSource::File { sequence_start, .. } => *sequence_start,
         JobSource::EffectCraft { .. } => None,
     };
+    let encode_stage0 = if has_render { 1 } else { 0 };
+    let mapper_cb = Arc::clone(&mapper);
+    let clock_cb = Arc::clone(&clock);
     let result = encode_with_stall(
         &ff,
         &source_file,
@@ -157,23 +164,28 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         &stop,
         stall,
         |p| {
-            let snap = encodecraft_queue::ProgressSnap::from(p);
             let mut last = last_prog.lock().unwrap_or_else(|p| p.into_inner());
-            if last.elapsed() < std::time::Duration::from_millis(120) && !p.done {
+            if last.elapsed() < Duration::from_millis(120) && !p.done {
                 return;
             }
-            *last = std::time::Instant::now();
+            *last = Instant::now();
+            let pass_i = if p.pass_count > 0 { p.pass_index } else { 0 };
+            let stage = encode_stage0 + pass_i;
+            if let Ok(mut c) = clock_cb.lock() {
+                c.enter(stage);
+            }
+            let stage_pct = if p.pass_count > 1 { p.pass_percent } else { p.percent };
+            let label = if p.stage.is_empty() { mapper_cb.label(stage).to_string() } else { p.stage.clone() };
+            let mut snap = encodecraft_queue::ProgressSnap::from(p);
+            snap.stage = label;
+            snap.percent = mapper_cb.overall(stage, stage_pct);
+            let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
+            if snap.percent > 1.0 && elapsed > 0.4 {
+                let total = elapsed / (snap.percent as f64 / 100.0);
+                snap.eta_sec = Some((total - elapsed).max(0.0));
+            }
             h_prog.lock(|s| {
                 if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
-                    let mut snap = snap;
-                    if render_weight > 0.0 {
-                        snap.percent = (render_weight * 100.0) + snap.percent * (1.0 - render_weight);
-                    }
-                    let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
-                    if snap.percent > 2.0 && elapsed > 0.4 {
-                        let total = elapsed / (snap.percent as f64 / 100.0);
-                        snap.eta_sec = Some((total - elapsed).max(0.0));
-                    }
                     j.progress = snap;
                 }
             });
@@ -194,6 +206,10 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
             });
         },
     )?;
+    if let Ok(mut c) = clock.lock() {
+        c.finish();
+        stage::record(has_render, n_passes, c.samples());
+    }
     h.lock(|s| {
         if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
             j.measured_bitrate_kbps = result.measured_video_kbps;
@@ -212,7 +228,8 @@ fn resolve_source(
     h: &Handle,
     job: &encodecraft_queue::Job,
     stop: &EncodeStop,
-    render_weight: f32,
+    mapper: Arc<JobProgress>,
+    clock: Arc<Mutex<StageClock>>,
     started_ms: u64,
 ) -> Result<PathBuf, crate::EngineError> {
     match &job.source {
@@ -245,36 +262,95 @@ fn resolve_source(
             });
             let hid = job.id.clone();
             let handle = h.clone();
-            run_command(&args, stop, |line| {
-                handle.lock(|s| {
-                    if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
-                        if let Some(pct) = parse_render_progress(line) {
+            let last_parsed = Arc::new(Mutex::new(None::<RenderProgress>));
+            let last_ui = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(200)));
+            let apply = Arc::new({
+                let handle = handle.clone();
+                let hid = hid.clone();
+                let mapper = Arc::clone(&mapper);
+                let last_parsed = Arc::clone(&last_parsed);
+                let last_ui = Arc::clone(&last_ui);
+                move |force: bool| {
+                    let mut last = last_ui.lock().unwrap_or_else(|p| p.into_inner());
+                    if !force && last.elapsed() < Duration::from_millis(80) {
+                        return;
+                    }
+                    *last = Instant::now();
+                    let parsed = last_parsed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
+                    let stage_pct = match &parsed {
+                        Some(p) => p.percent,
+                        None => {
+                            let expected = mapper.expected_sec(0);
+                            ((elapsed / expected) * 90.0).clamp(0.0, 90.0) as f32
+                        }
+                    };
+                    let percent = mapper.overall(0, stage_pct);
+                    let eta = if percent > 1.0 && elapsed > 0.4 {
+                        let total = elapsed / (percent as f64 / 100.0);
+                        Some((total - elapsed).max(0.0))
+                    } else {
+                        None
+                    };
+                    handle.lock(|s| {
+                        if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
                             j.progress.stage = "Rendering comp".into();
-                            j.progress.percent = (pct * render_weight).clamp(0.0, render_weight * 99.0);
-                            let elapsed = (unix_ms().saturating_sub(started_ms) as f64) / 1000.0;
-                            if j.progress.percent > 2.0 && elapsed > 0.4 {
-                                let total = elapsed / (j.progress.percent as f64 / 100.0);
-                                j.progress.eta_sec = Some((total - elapsed).max(0.0));
+                            j.progress.percent = percent;
+                            j.progress.eta_sec = eta;
+                            if let Some(p) = &parsed {
+                                if let Some(n) = p.frame {
+                                    j.progress.frame = n;
+                                }
+                                if let Some(t) = p.total {
+                                    j.progress.total_frames = t;
+                                }
                             }
                         }
-                        const MAX: usize = 24_576;
-                        if j.log.len() > MAX {
-                            j.log = j.log[j.log.len() - 12_288..].to_string();
+                    });
+                    handle.note_change();
+                    handle.emit_ui(crate::UiEvent::Changed);
+                }
+            });
+            run_command(
+                &args,
+                stop,
+                {
+                    let apply = Arc::clone(&apply);
+                    let last_parsed = Arc::clone(&last_parsed);
+                    let handle = handle.clone();
+                    let hid = hid.clone();
+                    move |line| {
+                        if let Some(p) = parse_render_progress(line) {
+                            *last_parsed.lock().unwrap_or_else(|p| p.into_inner()) = Some(p);
+                            apply(true);
                         }
-                        j.log.push_str(line);
-                        j.log.push('\n');
+                        handle.lock(|s| {
+                            if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
+                                const MAX: usize = 24_576;
+                                if j.log.len() > MAX {
+                                    j.log = j.log[j.log.len() - 12_288..].to_string();
+                                }
+                                j.log.push_str(line);
+                                j.log.push('\n');
+                            }
+                        });
                     }
-                });
-                handle.note_change();
-                handle.emit_ui(crate::UiEvent::Changed);
-            })?;
+                },
+                {
+                    let apply = Arc::clone(&apply);
+                    move || apply(false)
+                },
+            )?;
             if !out.exists() {
                 return Err(crate::EngineError::Message(format!("effectcraft-cli did not write {}", out.display())));
             }
+            if let Ok(mut c) = clock.lock() {
+                c.enter(1.min(mapper.labels.len().saturating_sub(1)));
+            }
             h.lock(|s| {
                 if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == job.id) {
-                    j.progress.stage = "Encoding".into();
-                    j.progress.percent = render_weight * 100.0;
+                    j.progress.stage = mapper.label(1.min(mapper.labels.len().saturating_sub(1))).into();
+                    j.progress.percent = mapper.overall(0, 100.0);
                 }
             });
             Ok(out)
@@ -282,7 +358,7 @@ fn resolve_source(
     }
 }
 
-fn run_command(args: &[String], stop: &EncodeStop, mut on_line: impl FnMut(&str)) -> Result<(), crate::EngineError> {
+fn run_command(args: &[String], stop: &EncodeStop, mut on_line: impl FnMut(&str), mut on_tick: impl FnMut()) -> Result<(), crate::EngineError> {
     let (prog, rest) = args.split_first().ok_or_else(|| crate::EngineError::Message("empty command".into()))?;
     let mut child = hidden_command(prog).args(rest).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take();
@@ -323,39 +399,114 @@ fn run_command(args: &[String], stop: &EncodeStop, mut on_line: impl FnMut(&str)
                 return Ok(());
             }
             Some(st) => return Err(crate::EngineError::Message(format!("effectcraft-cli exited {}", st.code().unwrap_or(-1)))),
-            None => thread::sleep(Duration::from_millis(80)),
+            None => {
+                on_tick();
+                thread::sleep(Duration::from_millis(80));
+            }
         }
     }
 }
 
-/// Parse EffectCraft / FFmpeg-style render progress into 0..=100.
-pub(crate) fn parse_render_progress(line: &str) -> Option<f32> {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderProgress {
+    pub percent: f32,
+    pub frame: Option<u64>,
+    pub total: Option<u64>,
+}
+
+fn json_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+        .or_else(|| v.as_f64().and_then(|f| if f.is_finite() && f >= 0.0 { Some(f as u64) } else { None }))
+}
+
+fn json_f32(v: &serde_json::Value) -> Option<f32> {
+    v.as_f64().map(|f| f as f32).or_else(|| v.as_u64().map(|n| n as f32)).or_else(|| v.as_i64().map(|n| n as f32))
+}
+
+fn from_frame_total(n: u64, m: u64) -> Option<RenderProgress> {
+    if m == 0 {
+        return None;
+    }
+    Some(RenderProgress { percent: (n as f32 / m as f32 * 100.0).clamp(0.0, 100.0), frame: Some(n), total: Some(m) })
+}
+
+/// Parse EffectCraft / FFmpeg-style render progress.
+pub(crate) fn parse_render_progress(line: &str) -> Option<RenderProgress> {
     let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if line.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let total = v.get("total").or_else(|| v.get("frames")).and_then(json_u64);
+            let n = v.get("n").or_else(|| v.get("frame")).or_else(|| v.get("current")).and_then(json_u64);
+            if let (Some(n), Some(m)) = (n, total) {
+                return from_frame_total(n, m);
+            }
+            if let Some(p) = v.get("percent").or_else(|| v.get("progress")).and_then(json_f32) {
+                let percent = if p <= 1.0 && p >= 0.0 && v.get("percent").is_none() { p * 100.0 } else { p };
+                return Some(RenderProgress { percent: percent.clamp(0.0, 100.0), frame: n, total });
+            }
+        }
+    }
     if let Some(rest) = line.strip_prefix("progress=") {
         let v: f32 = rest.trim().parse().ok()?;
-        return Some(if v <= 1.0 { v * 100.0 } else { v.clamp(0.0, 100.0) });
+        return Some(RenderProgress { percent: if v <= 1.0 { v * 100.0 } else { v.clamp(0.0, 100.0) }, frame: None, total: None });
     }
     if let Some(rest) = line.strip_prefix("percent=") {
-        return rest.trim().parse::<f32>().ok().map(|v| v.clamp(0.0, 100.0));
+        return rest.trim().parse::<f32>().ok().map(|v| RenderProgress { percent: v.clamp(0.0, 100.0), frame: None, total: None });
     }
     let lower = line.to_ascii_lowercase();
     if let Some(idx) = lower.find(" of ") {
         let before = line[..idx].rsplit(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?;
         let after = line[idx + 4..].split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?;
-        let n: f32 = before.parse().ok()?;
-        let m: f32 = after.parse().ok()?;
-        if m > 0.0 {
-            return Some((n / m * 100.0).clamp(0.0, 100.0));
-        }
+        let n: u64 = before.parse().ok()?;
+        let m: u64 = after.parse().ok()?;
+        return from_frame_total(n, m);
     }
     if let Some(i) = line.find("frame=") {
         let rest = line[i + 6..].trim();
-        let n: f32 = rest.split_whitespace().next()?.parse().ok()?;
+        let n: u64 = rest.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()?;
         if let Some(t) = lower.find("total=") {
-            let m: f32 = line[t + 6..].split(|c: char| !c.is_ascii_digit() && c != '.').find(|s| !s.is_empty())?.parse().ok()?;
-            if m > 0.0 {
-                return Some((n / m * 100.0).clamp(0.0, 100.0));
+            let m: u64 = line[t + 6..].split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()?;
+            return from_frame_total(n, m);
+        }
+    }
+    parse_slash_fraction(line)
+}
+
+/// `12/250` or `frame 12/250`. Skip date-like `2024/10`.
+fn parse_slash_fraction(line: &str) -> Option<RenderProgress> {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
             }
+            if i < bytes.len() && bytes[i] == b'/' {
+                let slash = i;
+                i += 1;
+                let t0 = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > t0 {
+                    if let (Ok(n), Ok(m)) = (line[start..slash].parse::<u64>(), line[t0..i].parse::<u64>()) {
+                        if m >= 2 && n <= m && m <= 1_000_000 {
+                            // 2024/10 looks like a date, not a frame count.
+                            if n >= 1000 && m <= 31 {
+                                continue;
+                            }
+                            return from_frame_total(n, m);
+                        }
+                    }
+                }
+            }
+        } else {
+            i += 1;
         }
     }
     None
@@ -367,9 +518,27 @@ mod tests {
 
     #[test]
     fn render_progress_parses_common_lines() {
-        assert_eq!(parse_render_progress("progress=0.4"), Some(40.0));
-        assert_eq!(parse_render_progress("percent=12.5"), Some(12.5));
-        assert_eq!(parse_render_progress("Rendering frame 25 of 250"), Some(10.0));
+        let p = parse_render_progress("progress=0.4").unwrap();
+        assert!((p.percent - 40.0).abs() < 0.01);
+        let p = parse_render_progress("percent=12.5").unwrap();
+        assert!((p.percent - 12.5).abs() < 0.01);
+        let p = parse_render_progress("Rendering frame 25 of 250").unwrap();
+        assert_eq!((p.frame, p.total), (Some(25), Some(250)));
+        assert!((p.percent - 10.0).abs() < 0.01);
         assert!(parse_render_progress("hello").is_none());
+    }
+
+    #[test]
+    fn render_progress_parses_json_and_slash() {
+        let p = parse_render_progress(r#"{"event":"frame","n":12,"total":250}"#).unwrap();
+        assert_eq!((p.frame, p.total), (Some(12), Some(250)));
+        assert!((p.percent - 4.8).abs() < 0.05);
+        let p = parse_render_progress(r#"{"event":"progress","frame":50,"total":200}"#).unwrap();
+        assert_eq!(p.frame, Some(50));
+        let p = parse_render_progress("12/250").unwrap();
+        assert_eq!((p.frame, p.total), (Some(12), Some(250)));
+        let p = parse_render_progress("frame= 40 total= 200").unwrap();
+        assert_eq!((p.frame, p.total), (Some(40), Some(200)));
+        assert!(parse_render_progress("2024/10").is_none());
     }
 }

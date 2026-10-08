@@ -139,10 +139,20 @@ impl EncodeApp {
         if let Some(tex) = self.preview_tex.get(id) {
             ui.painter().image(tex.id(), img, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         } else {
-            let msg = if self.jobs_cache.iter().find(|j| j.id == id).is_some_and(|j| j.progress.stage == "Rendering comp") {
-                "Rendering composition…"
+            let job = self.jobs_cache.iter().find(|j| j.id == id);
+            let rendering = job.is_some_and(|j| j.progress.stage.starts_with("Rendering comp"));
+            let msg = if rendering {
+                if let Some(j) = job {
+                    if j.progress.frame > 0 && j.progress.total_frames > 0 {
+                        format!("Rendering composition… {}/{}", j.progress.frame, j.progress.total_frames)
+                    } else {
+                        "Rendering composition…".into()
+                    }
+                } else {
+                    "Rendering composition…".into()
+                }
             } else {
-                "Waiting for frame…"
+                "Waiting for frame…".into()
             };
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, FontId::proportional(13.0), t.text_faint);
         }
@@ -186,7 +196,8 @@ impl EncodeApp {
         let fps = if job.progress.fps > 0.05 { format!("{:.1} fps", job.progress.fps) } else { "—".into() };
         let br = format_bitrate(job.progress.bitrate_kbps);
         let size = if detailed { 13.0 } else { 11.0 };
-        ui.label(RichText::new(format!("{pct:.1}%  ·  Frame {frame}  ·  {tc}")).color(t.text).size(size));
+        let frame_label = if job.progress.total_frames > 0 { format!("{}/{}", job.progress.frame, job.progress.total_frames) } else { format!("{frame}") };
+        ui.label(RichText::new(format!("{pct:.1}%  ·  Frame {frame_label}  ·  {tc}")).color(t.text).size(size));
         ui.label(RichText::new(format!("Elapsed {}  ·  Remaining {remain}", format_duration(elapsed))).color(t.text_dim).size(11.0));
         ui.label(RichText::new(format!("{speed}  ·  {fps}  ·  {br}")).color(t.text).size(11.0));
     }

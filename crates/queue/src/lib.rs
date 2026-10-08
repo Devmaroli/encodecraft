@@ -126,6 +126,9 @@ pub struct ProgressSnap {
     /// `Rendering comp`, `Encoding pass 1/2`, …
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stage: String,
+    /// Total frames in the current stage (EffectCraft render). 0 = unknown.
+    #[serde(default)]
+    pub total_frames: u64,
 }
 
 impl From<&EncodeProgress> for ProgressSnap {
@@ -139,6 +142,7 @@ impl From<&EncodeProgress> for ProgressSnap {
             out_time_sec: p.out_time_sec,
             bitrate_kbps: p.bitrate_kbps,
             stage: p.stage.clone(),
+            total_frames: p.total_frames,
         }
     }
 }

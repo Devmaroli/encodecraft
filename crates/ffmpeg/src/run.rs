@@ -96,6 +96,11 @@ pub fn encode_with_stall(
 
     for (i, plan) in plans.iter().enumerate() {
         on_log(&plan.display_cmdline(&ff.ffmpeg));
+        progress.percent = 0.0;
+        progress.pass_percent = 0.0;
+        progress.out_time_sec = 0.0;
+        progress.done = false;
+        progress.frame = 0;
         if n_passes > 1 {
             progress.stage = format!("Encoding pass {}/{}", i + 1, n_passes);
             on_log(&format!("pass {}/{}", i + 1, n_passes));
@@ -104,6 +109,7 @@ pub fn encode_with_stall(
         } else {
             progress.stage = "Encoding".into();
         }
+        on_progress(&scale_progress(&progress, i, n_passes));
         match run_one_plan(ff, plan, duration, stall_secs, stop, &mut progress, &mut log, &mut on_progress, &mut on_log, i, n_passes) {
             Ok(()) => {}
             Err(e) => {
@@ -155,11 +161,8 @@ fn enforce_min_bitrate(
     if measured.unwrap_or(0.0) + 20.0 >= min_f {
         return Ok((measured, false, extra));
     }
-    let msg = format!(
-        "average {:.2} Mbps is below min {:.2} Mbps — filler pass (nal-hrd cbr, picture unchanged)",
-        measured.unwrap_or(0.0) / 1000.0,
-        min_f / 1000.0
-    );
+    let msg =
+        format!("average {:.2} Mbps is below min {:.2} Mbps — filler pass (nal-hrd cbr, picture unchanged)", measured.unwrap_or(0.0) / 1000.0, min_f / 1000.0);
     extra.push_str(&msg);
     extra.push('\n');
     on_log(&msg);
@@ -170,22 +173,10 @@ fn enforce_min_bitrate(
         // x264 HRD on short clips often lands ~10% under -b:v. Aim a little over the
         // min (capped at max) so the finished-file average still clears the floor.
         let cbr = (min_m / 0.90).min(max_mbps.max(min_m));
-        floor.video.quality = encodecraft_presets::Quality::Vbr2Pass {
-            target_mbps: cbr,
-            max_mbps: cbr,
-            min_mbps: Some(cbr),
-            two_pass: false,
-        };
+        floor.video.quality = encodecraft_presets::Quality::Vbr2Pass { target_mbps: cbr, max_mbps: cbr, min_mbps: Some(cbr), two_pass: false };
     }
     let tmp = partial_output(final_out);
-    let mut plan = build_encode_plan(PlanInput {
-        source,
-        output: tmp.clone(),
-        preset: &floor,
-        trim,
-        media,
-        sequence_start,
-    });
+    let mut plan = build_encode_plan(PlanInput { source, output: tmp.clone(), preset: &floor, trim, media, sequence_start });
     if !floor.video.use_nvenc {
         inject_hrd_cbr(&mut plan.args);
     }
@@ -224,13 +215,15 @@ fn run_one_plan(
     n_passes: usize,
 ) -> Result<(), FfmpegError> {
     let mut child = ChildGuard {
-        child: Some(super::proc::command(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                FfmpegError::Missing
-            } else {
-                FfmpegError::Io(e)
-            }
-        })?),
+        child: Some(super::proc::command(&ff.ffmpeg).args(&plan.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(
+            |e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    FfmpegError::Missing
+                } else {
+                    FfmpegError::Io(e)
+                }
+            },
+        )?),
     };
 
     let stdout = child.stdout();
@@ -325,11 +318,14 @@ fn run_one_plan(
 }
 
 fn scale_progress(p: &EncodeProgress, pass_i: usize, n_passes: usize) -> EncodeProgress {
+    let mut q = p.clone();
+    q.pass_index = pass_i;
+    q.pass_count = n_passes.max(1);
+    q.pass_percent = p.percent;
     if n_passes <= 1 {
-        return p.clone();
+        return q;
     }
     let span = 100.0 / n_passes as f32;
-    let mut q = p.clone();
     q.done = false;
     q.percent = (pass_i as f32).mul_add(span, (p.percent / 100.0) * span);
     q
@@ -354,11 +350,7 @@ fn humanize_h264_error(stderr: &str, plan: &super::command::EncodePlan) -> Strin
         || s.contains("width not divisible")
         || s.contains("level restriction");
     if looks {
-        format!(
-            "H.264 cannot encode this frame size with libx264 (output {}). FFmpeg said: {}",
-            plan.output.display(),
-            tail(stderr, 1500)
-        )
+        format!("H.264 cannot encode this frame size with libx264 (output {}). FFmpeg said: {}", plan.output.display(), tail(stderr, 1500))
     } else {
         stderr.to_string()
     }
@@ -532,6 +524,21 @@ mod tests {
     }
 
     #[test]
+    fn scale_progress_keeps_pass_local_percent() {
+        let mut p = EncodeProgress { percent: 50.0, stage: "Encoding pass 1/2".into(), ..EncodeProgress::default() };
+        let q = scale_progress(&p, 0, 2);
+        assert_eq!(q.pass_index, 0);
+        assert_eq!(q.pass_count, 2);
+        assert!((q.pass_percent - 50.0).abs() < 0.01);
+        assert!((q.percent - 25.0).abs() < 0.01);
+        p.percent = 0.0;
+        p.stage = "Encoding pass 2/2".into();
+        let q2 = scale_progress(&p, 1, 2);
+        assert_eq!(q2.pass_index, 1);
+        assert!(q2.percent >= 49.0 && q2.percent < 51.0, "{}", q2.percent);
+    }
+
+    #[test]
     fn ffmpeg_encodes_tall_h264_level62() {
         let Ok(ff) = crate::find_ffmpeg() else {
             eprintln!("skip: ffmpeg not on PATH");
@@ -543,7 +550,20 @@ mod tests {
             let src = dir.join(format!("{name}-src.mp4"));
             let out = dir.join(format!("{name}-out.mp4"));
             let status = Command::new(&ff.ffmpeg)
-                .args(["-hide_banner", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={w}x{h}:rate=25:duration=0.2"), "-frames:v", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .args([
+                    "-hide_banner",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=size={w}x{h}:rate=25:duration=0.2"),
+                    "-frames:v",
+                    "2",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
                 .arg(&src)
                 .status()
                 .expect("spawn lavfi");
@@ -577,11 +597,27 @@ mod tests {
         let mk = |filter: &str, dest: &Path| {
             let st = Command::new(&ff.ffmpeg)
                 .args([
-                    "-hide_banner", "-y",
-                    "-f", "lavfi", "-i", filter,
-                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                    "-t", "2", "-shortest",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    "-hide_banner",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    filter,
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "2",
+                    "-shortest",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
                 ])
                 .arg(dest)
                 .status()

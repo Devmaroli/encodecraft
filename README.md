@@ -68,9 +68,9 @@ cargo run -p encodecraft-cli -- ffmpeg
 
 EncodeCraft keeps the UI thread free of FFmpeg, ffprobe, watch-folder scans, preset/queue disk writes, and IPC. Queue edits apply on the same frame; size/duration fill in afterwards with a per-row spinner. The Queue, Preset Browser, and Log only draw visible rows.
 
-- Progress while encoding repaints about 8 times a second. Idle (nothing encoding, no toast) does not keep the window spinning.
-- `ENCODECRAFT_PERF=1` shows a frame-time overlay and logs frames over 16 ms.
-- `ENCODECRAFT_BENCH=1` seeds 1,000 outputs, times ~90 frames, prints `avg` / `p95` / `max`, and exits. `ENCODECRAFT_BENCH=encode2` does the same with two rows marked encoding. Optional: `ENCODECRAFT_BENCH_ROWS`, `ENCODECRAFT_BENCH_FRAMES`.
+- Progress while encoding repaints about 8 times a second. Idle (nothing encoding, no toast) does not keep the window spinning. Queue/preset/settings JSON is written on a worker thread, debounced to a couple of times a second.
+- `ENCODECRAFT_PERF=1` shows a frame-time overlay and logs frames over 16 ms and slow I/O.
+- `ENCODECRAFT_BENCH=1` seeds 1,000 outputs, times ~90 frames (after a short warmup), prints `avg` / `p95` / `max`, and exits. `ENCODECRAFT_BENCH=encode2` does the same with two rows marked encoding. Optional: `ENCODECRAFT_BENCH_ROWS`, `ENCODECRAFT_BENCH_FRAMES`.
 
 ## Run
 

@@ -1,5 +1,6 @@
 //! Queue / Preset Browser / settings windows matching the approved mockups.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ pub struct SourceGroup {
 impl EncodeApp {
     pub fn queue_panel_ux(&mut self, ui: &mut Ui) {
         let t = self.t();
-        let jobs = self.jobs_cache.clone();
+        let jobs = std::mem::take(&mut self.jobs_cache);
         let groups = group_jobs(&jobs);
         let (better, inst) = studio_counts(&jobs);
 
@@ -71,6 +72,7 @@ impl EncodeApp {
                 }
             });
             self.draw_toast(ui);
+            self.jobs_cache = jobs;
             return;
         }
 
@@ -80,6 +82,7 @@ impl EncodeApp {
             Source(&'a SourceGroup),
             Output(&'a Job),
         }
+        let by_id: HashMap<&str, usize> = jobs.iter().enumerate().map(|(i, j)| (j.id.as_str(), i)).collect();
         let mut flat: Vec<FlatRow<'_>> = Vec::with_capacity(jobs.len().saturating_add(groups.len()));
         for g in &groups {
             flat.push(FlatRow::Source(g));
@@ -87,8 +90,8 @@ impl EncodeApp {
                 continue;
             }
             for id in &g.job_ids {
-                if let Some(job) = jobs.iter().find(|j| j.id == *id) {
-                    flat.push(FlatRow::Output(job));
+                if let Some(&idx) = by_id.get(id.as_str()) {
+                    flat.push(FlatRow::Output(&jobs[idx]));
                 }
             }
         }
@@ -105,6 +108,7 @@ impl EncodeApp {
         self.paint_queue_drag_layer(ui, &jobs, &geoms);
         self.preset_popup(ui, &jobs);
         self.format_popup(ui, &jobs);
+        self.jobs_cache = jobs;
     }
 
     fn source_row(&mut self, ui: &mut Ui, g: &SourceGroup, jobs: &[Job], _order: &[String], geoms: &mut Vec<QueueGeom>) {

@@ -89,6 +89,7 @@ impl PerfHud {
 pub struct BenchRun {
     pub rows: usize,
     pub remaining: u32,
+    pub warmup: u32,
     pub times: Vec<f32>,
     pub encode_two: bool,
 }
@@ -101,10 +102,14 @@ impl BenchRun {
         }
         let rows = std::env::var("ENCODECRAFT_BENCH_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
         let frames = std::env::var("ENCODECRAFT_BENCH_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
-        Some(Self { rows, remaining: frames, times: Vec::new(), encode_two: raw == "encode2" })
+        Some(Self { rows, remaining: frames, warmup: 10, times: Vec::new(), encode_two: raw == "encode2" })
     }
 
     pub fn record(&mut self, dt: Duration) {
+        if self.warmup > 0 {
+            self.warmup = self.warmup.saturating_sub(1);
+            return;
+        }
         self.times.push(dt.as_secs_f32() * 1000.0);
         self.remaining = self.remaining.saturating_sub(1);
     }

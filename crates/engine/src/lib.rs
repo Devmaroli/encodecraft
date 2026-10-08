@@ -111,18 +111,21 @@ impl Handle {
         f(&mut g)
     }
 
+    /// Snapshot under the lock, then write JSON on this thread. Call from the I/O
+    /// worker — not from `egui` update. Does not clear [`Self::dirty`]; the caller
+    /// should have used [`Self::take_dirty`].
     pub fn persist(&self) {
-        self.lock(|s| {
-            let _ = s.save();
-        });
-        self.dirty.store(false, Ordering::Relaxed);
+        let (settings, presets, queue) = self.lock(|s| (s.settings.clone(), s.presets.clone(), s.queue.clone()));
+        let _ = paths::ensure_dirs();
+        let _ = settings.save(&paths::settings_path());
+        let _ = presets.save(&paths::presets_path());
+        let _ = persist::save_queue(&paths::queue_path(), &queue);
     }
 
-    /// Queue a disk write on the I/O thread. Safe to call from the UI.
+    /// Mark the session changed so the UI snapshot refreshes and a debounced disk
+    /// write runs on the I/O thread (≤ ~200 ms). Never writes from the UI thread.
     pub fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Relaxed);
-        self.rev.fetch_add(1, Ordering::Relaxed);
-        self.submit_io(tasks::IoCmd::Persist);
+        self.note_change();
     }
 
     pub fn note_change(&self) {

@@ -44,7 +44,7 @@ impl EncodeApp {
         });
         ui.separator();
         ui.allocate_ui(egui::Vec2::new(avail.x, bottom_h), |ui| {
-            let _ = DockSurface::Inspector;
+            let _ = (DockSurface::Queue, DockSurface::Inspector);
             self.bottom(ui);
         });
         let _ = BottomTab::Encode;

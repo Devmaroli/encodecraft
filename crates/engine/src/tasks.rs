@@ -75,7 +75,10 @@ fn io_loop(h: Handle, rx: Receiver<IoCmd>, ui: Sender<UiEvent>) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         match cmd {
-            IoCmd::Persist => persist_timed(&h, &ui),
+            IoCmd::Persist => {
+                let _ = h.take_dirty();
+                persist_timed(&h, &ui);
+            }
             IoCmd::Probe(ids) => probe_ids(&h, &ids, &ui),
             IoCmd::Thumb(id) => thumb_one(&h, &id, &ui),
             IoCmd::ListEcproj(path) => list_ecproj(&path, &ui),

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Color32, CornerRadius, Pos2, RichText, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_engine::{classify_dropped_paths, seed_preset_ui_demo, seed_stress_queue, DropOutcome, Handle, IoCmd, UiEvent};
 use encodecraft_job::{ScaleMode, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
@@ -31,7 +31,6 @@ pub struct EncodeApp {
     pub(crate) edit_preset: Option<ExportPreset>,
     thumb_tex: HashMap<String, egui::TextureHandle>,
     pub(crate) status: String,
-    last_persist: std::time::Instant,
     drop_notice: Option<(String, Instant)>,
     ecproj_picker: Option<EcprojPicker>,
     pub(crate) show_rules: bool,
@@ -50,11 +49,11 @@ pub struct EncodeApp {
     pub(crate) show_screen_picker: bool,
     pub(crate) jobs_cache: Vec<Job>,
     snap_rev: u64,
-    last_snap: Instant,
     queue_running: bool,
     ffmpeg_ok: bool,
     ffmpeg_msg: String,
     thumb_inflight: HashSet<String>,
+    theme_applied: bool,
     perf: perf::PerfHud,
     bench: Option<perf::BenchRun>,
 }
@@ -85,7 +84,9 @@ impl EncodeApp {
             let _ = handle.lock(|s| seed_stress_queue(s, n));
             if raw == "encode2" {
                 handle.lock(|s| {
-                    s.queue.running = true;
+                    // Keep the worker idle so the bench measures UI + progress
+                    // chrome, not FFmpeg startup on missing stress sources.
+                    s.queue.running = false;
                     for (i, j) in s.queue.jobs.iter_mut().take(2).enumerate() {
                         j.status = JobStatus::Encoding;
                         j.progress.percent = 10.0 + (i as f32) * 20.0;
@@ -107,7 +108,6 @@ impl EncodeApp {
             edit_preset: None,
             thumb_tex: HashMap::new(),
             status: String::new(),
-            last_persist: std::time::Instant::now(),
             drop_notice: None,
             ecproj_picker: None,
             show_rules: false,
@@ -126,11 +126,11 @@ impl EncodeApp {
             show_screen_picker: false,
             jobs_cache: Vec::new(),
             snap_rev: 0,
-            last_snap: Instant::now(),
             queue_running: false,
             ffmpeg_ok: true,
             ffmpeg_msg: String::new(),
             thumb_inflight: HashSet::new(),
+            theme_applied: false,
             perf: perf::PerfHud::default(),
             bench: perf::BenchRun::from_env(),
         }
@@ -166,9 +166,7 @@ impl EncodeApp {
 
     fn refresh_snapshot(&mut self) {
         let rev = self.handle.revision();
-        let encoding = self.jobs_cache.iter().any(|j| j.status.is_active());
-        let due = encoding && self.last_snap.elapsed() >= Duration::from_millis(120);
-        if rev == self.snap_rev && !due && !self.jobs_cache.is_empty() {
+        if rev == self.snap_rev && !self.jobs_cache.is_empty() {
             return;
         }
         let (jobs, running, ff) = self.handle.lock(|s| {
@@ -186,7 +184,6 @@ impl EncodeApp {
         self.ffmpeg_ok = ff.0;
         self.ffmpeg_msg = ff.1;
         self.snap_rev = rev;
-        self.last_snap = Instant::now();
     }
 
     fn schedule_repaint(&self, ctx: &egui::Context) {
@@ -222,7 +219,10 @@ impl eframe::App for EncodeApp {
             std::process::exit(0);
         }
         self.perf.begin_frame();
-        theme::apply(ctx, &self.tokens);
+        if !self.theme_applied {
+            theme::apply(ctx, &self.tokens);
+            self.theme_applied = true;
+        }
         self.poll_background(ctx);
         self.refresh_snapshot();
         self.schedule_repaint(ctx);
@@ -554,6 +554,14 @@ impl EncodeApp {
             ui.label(RichText::new("Select a queue item to edit export settings.").color(t.text_dim));
             return;
         };
+        let original = (
+            job.preset.clone(),
+            job.scale,
+            job.trim,
+            job.preset_overridden,
+            job.preset_reason,
+            job.encode_warning.clone(),
+        );
         ui.horizontal(|ui| {
             ui.label("Preset");
             let presets = self.handle.lock(|s| s.presets.all());
@@ -712,12 +720,25 @@ impl EncodeApp {
             job.preset.video.width.unwrap_or(0),
             job.preset.video.height.unwrap_or(0),
         );
-        self.handle.lock(|s| {
-            if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
-                *j = job;
-            }
-        });
-        self.handle.note_change();
+        let changed = job.preset != original.0
+            || job.scale != original.1
+            || job.trim != original.2
+            || job.preset_overridden != original.3
+            || job.preset_reason != original.4
+            || job.encode_warning != original.5;
+        if changed {
+            self.handle.lock(|s| {
+                if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == id) {
+                    j.preset = job.preset;
+                    j.scale = job.scale;
+                    j.trim = job.trim;
+                    j.preset_overridden = job.preset_overridden;
+                    j.preset_reason = job.preset_reason;
+                    j.encode_warning = job.encode_warning;
+                }
+            });
+            self.handle.note_change();
+        }
     }
 
     fn preview_panel(&mut self, ui: &mut Ui) {
@@ -1049,20 +1070,6 @@ fn selected_job(h: &Handle) -> Option<Job> {
     h.lock(|s| s.selected.as_ref().and_then(|id| s.queue.jobs.iter().find(|j| j.id == *id)).cloned())
 }
 
-fn s_selected(h: &Handle) -> Option<String> {
-    h.lock(|s| s.selected.clone())
-}
-
-fn dummy(s: &str) -> String {
-    s.to_string()
-}
-
-fn status_dot(ui: &mut Ui, st: JobStatus, t: &Tokens) {
-    let c = status_color(st, t);
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.5, c);
-}
-
 pub(crate) fn status_color(st: JobStatus, t: &Tokens) -> Color32 {
     match st {
         JobStatus::Waiting => t.text_dim,
@@ -1071,21 +1078,6 @@ pub(crate) fn status_color(st: JobStatus, t: &Tokens) -> Color32 {
         JobStatus::Done => t.cache_green,
         JobStatus::Failed => t.danger,
         JobStatus::Stopped => t.text_faint,
-    }
-}
-
-fn speed_lbl(s: f32) -> String {
-    if s <= 0.0 {
-        "—".into()
-    } else {
-        format!("{s:.2}×")
-    }
-}
-
-fn eta_lbl(s: Option<f64>) -> String {
-    match s {
-        Some(v) if v.is_finite() => encodecraft_ffmpeg::format_duration(v),
-        _ => "—".into(),
     }
 }
 

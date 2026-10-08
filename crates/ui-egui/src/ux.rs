@@ -628,19 +628,12 @@ impl EncodeApp {
     fn click_select(&mut self, id: &str, order: &[String], ctrl: bool, shift: bool) {
         if shift {
             let anchor = self.shift_anchor.clone().unwrap_or_else(|| id.to_string());
-            if let (Some(a), Some(b)) = (order.iter().position(|x| x == &anchor), order.iter().position(|x| x == id)) {
-                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                self.selected_ids = order[lo..=hi].to_vec();
-            }
+            self.selected_ids = crate::select::range_select(order, &anchor, id);
             return;
         }
         self.shift_anchor = Some(id.to_string());
         if ctrl {
-            if self.selected_ids.iter().any(|x| x == id) {
-                self.selected_ids.retain(|x| x != id);
-            } else {
-                self.selected_ids.push(id.to_string());
-            }
+            crate::select::toggle_id(&mut self.selected_ids, id);
         } else {
             self.selected_ids = vec![id.to_string()];
         }

@@ -6,7 +6,8 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -40,13 +41,14 @@ pub fn yuv420p_bytes_per_frame(width: u32, height: u32) -> u64 {
     y.saturating_add(2u64.saturating_mul(cw.saturating_mul(ch)))
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CliCaps {
     pub yuv420p: bool,
     pub serve: bool,
     pub gpu_flag: bool,
     pub sidecar: bool,
     pub audio_out: bool,
+    pub fps_flag: bool,
 }
 
 impl CliCaps {
@@ -64,10 +66,44 @@ pub fn caps_from_help(render_help: &str, serve_help: &str) -> CliCaps {
         gpu_flag: r.contains("--gpu") || s.contains("--gpu"),
         sidecar: r.contains("--sidecar"),
         audio_out: r.contains("--audio-out") || r.contains("--audio_out"),
+        fps_flag: r.contains("--fps"),
     }
 }
 
+struct CapsMemo {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    len: u64,
+    caps: CliCaps,
+}
+
+static CAPS_MEMO: Mutex<Option<CapsMemo>> = Mutex::new(None);
+
+fn cli_fingerprint(cli: &Path) -> (Option<SystemTime>, u64) {
+    match std::fs::metadata(cli) {
+        Ok(m) => (m.modified().ok(), m.len()),
+        Err(_) => (None, 0),
+    }
+}
+
+/// Probe `effectcraft-cli --help`. Cached by executable path + mtime (+ size) so a fresh job is not two ~1 s spawns.
 pub fn probe_cli_caps(cli: &Path) -> CliCaps {
+    let (mtime, len) = cli_fingerprint(cli);
+    if let Ok(g) = CAPS_MEMO.lock() {
+        if let Some(memo) = g.as_ref() {
+            if memo.path == cli && memo.mtime == mtime && memo.len == len {
+                return memo.caps;
+            }
+        }
+    }
+    let caps = probe_cli_caps_uncached(cli);
+    if let Ok(mut g) = CAPS_MEMO.lock() {
+        *g = Some(CapsMemo { path: cli.to_path_buf(), mtime, len, caps });
+    }
+    caps
+}
+
+pub fn probe_cli_caps_uncached(cli: &Path) -> CliCaps {
     let render = help_text(cli, &["render", "--help"]);
     let serve = help_text(cli, &["serve", "--help"]);
     let mut caps = caps_from_help(&render, &serve);
@@ -78,6 +114,13 @@ pub fn probe_cli_caps(cli: &Path) -> CliCaps {
         }
     }
     caps
+}
+
+#[cfg(test)]
+pub fn clear_cli_caps_cache() {
+    if let Ok(mut g) = CAPS_MEMO.lock() {
+        *g = None;
+    }
 }
 
 fn help_text(cli: &Path, args: &[&str]) -> String {
@@ -244,8 +287,37 @@ impl RawVideoInput {
     }
 }
 
+/// Compact `--fps` value: `25`, `29.97`, `23.976`.
+pub fn format_cli_fps(fps: f64) -> String {
+    if !fps.is_finite() || fps <= 0.0 {
+        return "25".into();
+    }
+    let r = fps.round();
+    if (fps - r).abs() < 0.0005 {
+        format!("{}", r as i64)
+    } else {
+        let s = format!("{fps:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn push_fps_arg(args: &mut Vec<String>, fps: Option<f64>) {
+    if let Some(f) = fps.filter(|f| f.is_finite() && *f > 0.1) {
+        args.push("--fps".into());
+        args.push(format_cli_fps(f));
+    }
+}
+
 /// Cold streaming argv: frames on stdout, JSON on stderr.
-pub fn stream_render_args(cli: &Path, source: &JobSource, out: &Path, sidecar: &Path, audio_out: Option<&Path>, gpu: bool) -> Result<Vec<String>, FfmpegError> {
+pub fn stream_render_args(
+    cli: &Path,
+    source: &JobSource,
+    out: &Path,
+    sidecar: &Path,
+    audio_out: Option<&Path>,
+    gpu: bool,
+    fps: Option<f64>,
+) -> Result<Vec<String>, FfmpegError> {
     match source {
         JobSource::EffectCraft { project, comp, work_area, .. } => {
             let mut args = vec![
@@ -274,6 +346,7 @@ pub fn stream_render_args(cli: &Path, source: &JobSource, out: &Path, sidecar: &
             if gpu {
                 args.push("--gpu".into());
             }
+            push_fps_arg(&mut args, fps);
             Ok(args)
         }
         JobSource::File { .. } => Err(FfmpegError::Message("source is already a file".into())),
@@ -368,9 +441,52 @@ pub fn audio_wav_path(work_dir: &Path, job_id: &str) -> PathBuf {
     work_dir.join(format!("{job_id}-audio.wav"))
 }
 
+/// Raw YUV, sidecar, WAV, and leftover ProRes mezzanine files in the work directory.
+pub fn is_work_leftover(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.ends_with("-stream.yuv") || n.ends_with("-header.json") || n.ends_with("-audio.wav") || n.contains("-mezzanine.")
+}
+
+/// Delete this job's work files. Safe to call on success, failure, cancel, or panic unwind.
+pub fn remove_job_work_files(work_dir: &Path, job_id: &str) {
+    if job_id.is_empty() {
+        return;
+    }
+    let prefix = format!("{job_id}-");
+    if let Ok(rd) = std::fs::read_dir(work_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(s) = name.to_str() else { continue };
+            if s.starts_with(&prefix) && is_work_leftover(s) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_file(intermediate_yuv_path(work_dir, job_id));
+    let _ = std::fs::remove_file(sidecar_path(work_dir, job_id));
+    let _ = std::fs::remove_file(audio_wav_path(work_dir, job_id));
+}
+
+/// Startup sweep: drop leftover `*-stream.yuv`, `*-mezzanine.*`, sidecars, and WAVs.
+pub fn sweep_work_dir(work_dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(work_dir) else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some(s) = name.to_str() else { continue };
+        if is_work_leftover(s) && e.path().is_file() && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn yuv420_frame_size_matches_contract() {
@@ -391,7 +507,7 @@ mod tests {
 
     #[test]
     fn caps_detect_yuv_and_serve() {
-        let render = "render --format yuv420p|prores  --sidecar FILE  --gpu  --audio-out FILE";
+        let render = "render --format yuv420p|prores  --sidecar FILE  --gpu  --audio-out FILE --fps N";
         let serve = "serve --control PORT  --idle-exit  --gpu";
         let c = caps_from_help(render, serve);
         assert!(c.streaming());
@@ -399,9 +515,14 @@ mod tests {
         assert!(c.gpu_flag);
         assert!(c.sidecar);
         assert!(c.audio_out);
+        assert!(c.fps_flag);
         let old = caps_from_help("render --format prores --out FILE", "");
         assert!(!old.streaming());
         assert!(!old.serve);
+        assert!(!old.fps_flag);
+        let yuv_no_fps = caps_from_help("render --format yuv420p --sidecar FILE", "serve --control PORT");
+        assert!(yuv_no_fps.streaming());
+        assert!(!yuv_no_fps.fps_flag);
     }
 
     #[test]
@@ -457,7 +578,7 @@ mod tests {
             r#"#!/bin/sh
 case " $* " in
   *" render "*" --help "*|*" render --help "*)
-    echo "Usage: render --format yuv420p|prores --sidecar FILE --gpu --audio-out FILE"
+    echo "Usage: render --format yuv420p|prores --sidecar FILE --gpu --audio-out FILE --fps N"
     exit 0
     ;;
   *" serve "*" --help "*|*" serve --help "*)
@@ -480,6 +601,138 @@ echo "effectcraft-cli commands: render serve"
         assert!(caps.gpu_flag);
         assert!(caps.sidecar);
         assert!(caps.audio_out);
+        assert!(caps.fps_flag);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_cli_fps_compacts() {
+        assert_eq!(format_cli_fps(25.0), "25");
+        assert_eq!(format_cli_fps(29.97), "29.97");
+        assert_eq!(format_cli_fps(23.976), "23.976");
+    }
+
+    fn mock_effectcraft_source() -> JobSource {
+        JobSource::EffectCraft {
+            project: PathBuf::from("/p/karting.ecproj"),
+            comp: Some("Karting".into()),
+            mezzanine: "prores".into(),
+            work_area: false,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn stream_render_args_include_output_fps() {
+        let src = mock_effectcraft_source();
+        let args = stream_render_args(Path::new("/bin/effectcraft-cli"), &src, Path::new("-"), Path::new("/tmp/h.json"), None, false, Some(25.0)).unwrap();
+        assert!(args.windows(2).any(|w| w[0] == "--fps" && w[1] == "25"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--comp" && w[1] == "Karting"));
+        let no_fps = stream_render_args(Path::new("/bin/effectcraft-cli"), &src, Path::new("-"), Path::new("/tmp/h.json"), None, false, None).unwrap();
+        assert!(!no_fps.iter().any(|a| a == "--fps"), "{no_fps:?}");
+    }
+
+    #[test]
+    fn work_leftover_names_match_yuv_and_mezzanine() {
+        assert!(is_work_leftover("abc-stream.yuv"));
+        assert!(is_work_leftover("abc-mezzanine.mov"));
+        assert!(is_work_leftover("abc-mezzanine.MOV"));
+        assert!(is_work_leftover("abc-header.json"));
+        assert!(is_work_leftover("abc-audio.wav"));
+        assert!(!is_work_leftover("keep-me.txt"));
+        assert!(!is_work_leftover("queue.json"));
+    }
+
+    #[test]
+    fn sweep_and_remove_job_work_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "ec-work-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("job1-stream.yuv"), b"yuv").unwrap();
+        std::fs::write(dir.join("job1-header.json"), b"{}").unwrap();
+        std::fs::write(dir.join("job1-audio.wav"), b"RIFF").unwrap();
+        std::fs::write(dir.join("old-mezzanine.mov"), b"moov").unwrap();
+        std::fs::write(dir.join("keep.txt"), b"ok").unwrap();
+        remove_job_work_files(&dir, "job1");
+        assert!(!dir.join("job1-stream.yuv").exists());
+        assert!(!dir.join("job1-header.json").exists());
+        assert!(!dir.join("job1-audio.wav").exists());
+        assert!(dir.join("old-mezzanine.mov").exists(), "other jobs stay until sweep");
+        assert!(dir.join("keep.txt").exists());
+        let n = sweep_work_dir(&dir);
+        assert!(n >= 1);
+        assert!(!dir.join("old-mezzanine.mov").exists());
+        assert!(dir.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn caps_probe_cached_by_path_and_mtime() {
+        clear_cli_caps_cache();
+        let dir = std::env::temp_dir().join(format!("ec-capscache-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("effectcraft-cli");
+        let counter = dir.join("helps");
+        std::fs::write(&counter, "0").unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+echo x >> "{}"
+case " $* " in
+  *" render "*" --help "*|*" render --help "*)
+    echo "Usage: render --format yuv420p --sidecar FILE --gpu --audio-out FILE --fps N"
+    exit 0
+    ;;
+  *" serve "*" --help "*|*" serve --help "*)
+    echo "Usage: serve --control PORT --idle-exit --gpu"
+    exit 0
+    ;;
+esac
+echo "effectcraft-cli commands: render serve"
+"#,
+                counter.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let a = probe_cli_caps(&script);
+        assert!(a.streaming() && a.fps_flag, "{a:?}");
+        let n1 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
+        let b = probe_cli_caps(&script);
+        assert_eq!(a, b);
+        let n2 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
+        assert_eq!(n1, n2, "second probe must not spawn --help again");
+        assert!(n1 >= 2, "first probe runs render --help and serve --help, got {n1}");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+echo x >> "{}"
+echo "Usage: render --format yuv420p --sidecar FILE --fps N extra-bytes-to-change-size"
+echo "Usage: serve --control PORT"
+"#,
+                counter.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = probe_cli_caps(&script);
+        let n3 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
+        assert!(n3 > n2, "changed exe size/mtime must re-probe, {n3} vs {n2}");
+        clear_cli_caps_cache();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -985,7 +985,7 @@ impl EncodeApp {
         }
         ui.label(
             RichText::new(
-                "On by default when an NVIDIA GPU is present. EffectCraft still falls back to CPU if the frame does not fit. Non-RTX adapters were slower than CPU — leave this off unless you want to try them. Separate from GPU encode (NVENC). ENCODECRAFT_GPU_RENDER=0/1 overrides.",
+                "Off by default. CPU render was faster than GPU on RTX 3070 Ti (and GPU has a ~10 s first-time startup). EffectCraft still falls back to CPU if the frame does not fit. Separate from GPU encode (NVENC). ENCODECRAFT_GPU_RENDER=0/1 overrides.",
             )
             .small()
             .color(self.t().text_dim),

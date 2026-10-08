@@ -9,9 +9,7 @@ pub use naming::{
     apply_template, constrain_output_dir, default_template, effective_naming, is_legacy_default_template, is_under, naming_uses_size, normalize_path,
     output_path, sanitize_filename, unique_output_path, NamingContext,
 };
-pub use screen_rules::{
-    infer_screen_from_text, normalize_screen_name, PresetPick, PresetReason, ScreenMatchRule, ScreenPresetRules,
-};
+pub use screen_rules::{infer_screen_from_text, normalize_screen_name, PresetPick, PresetReason, ScreenMatchRule, ScreenPresetRules};
 
 pub const BETTER_RES_ID: &str = "system.better-res";
 pub const INSTALLATION_ID: &str = "system.installation";
@@ -174,6 +172,16 @@ pub enum FrameRate {
 impl Default for FrameRate {
     fn default() -> Self {
         FrameRate::Source
+    }
+}
+
+impl FrameRate {
+    /// Preset output fps to ask EffectCraft for. `Source` leaves the comp rate alone.
+    pub fn output_fps(self) -> Option<f64> {
+        match self {
+            FrameRate::Custom(f) if f.is_finite() && f > 0.1 => Some(f),
+            _ => None,
+        }
     }
 }
 
@@ -610,15 +618,7 @@ impl PresetLibrary {
             JobSource::File { path, .. } => (path.to_string_lossy().into_owned(), String::new()),
             JobSource::EffectCraft { project, comp, .. } => (project.to_string_lossy().into_owned(), comp.clone().unwrap_or_default()),
         };
-        let screen = screen
-            .map(|s| {
-                if s.name.trim().is_empty() {
-                    s.label()
-                } else {
-                    s.name.clone()
-                }
-            })
-            .unwrap_or_default();
+        let screen = screen.map(|s| if s.name.trim().is_empty() { s.label() } else { s.name.clone() }).unwrap_or_default();
         (project, comp, screen)
     }
 
@@ -628,10 +628,7 @@ impl PresetLibrary {
 
     pub fn get_sticky(&self, source: &JobSource, screen: Option<&ScreenSize>) -> Option<String> {
         let (project, comp, screen) = Self::sticky_parts(source, screen);
-        self.sticky_manuals
-            .iter()
-            .find(|s| Self::sticky_matches(s, &project, &comp, &screen))
-            .map(|s| s.preset_id.clone())
+        self.sticky_manuals.iter().find(|s| Self::sticky_matches(s, &project, &comp, &screen)).map(|s| s.preset_id.clone())
     }
 
     pub fn set_sticky(&mut self, source: &JobSource, screen: Option<&ScreenSize>, preset_id: String) {
@@ -863,16 +860,7 @@ fn preset(id: &str, name: &str, format: OutputFormat, quality: Quality, audio: b
     }
 }
 
-fn studio_h264(
-    id: &str,
-    name: &str,
-    min_mbps: f64,
-    target_mbps: f64,
-    max_mbps: f64,
-    two_pass: bool,
-    audio: bool,
-    one_off: bool,
-) -> ExportPreset {
+fn studio_h264(id: &str, name: &str, min_mbps: f64, target_mbps: f64, max_mbps: f64, two_pass: bool, audio: bool, one_off: bool) -> ExportPreset {
     ExportPreset {
         id: id.into(),
         name: name.into(),
@@ -1084,6 +1072,8 @@ mod tests {
         let br = lib.get(BETTER_RES_ID).unwrap();
         assert_eq!(br.name, "Better Res");
         assert_eq!(br.video.frame_rate, FrameRate::Custom(25.0));
+        assert_eq!(br.video.frame_rate.output_fps(), Some(25.0));
+        assert_eq!(FrameRate::Source.output_fps(), None);
         assert_eq!(br.video.h264_profile.as_deref(), Some("high"));
         assert_eq!(br.video.keyframe_interval, Some(72));
         assert_eq!(br.video.quality, Quality::vbr(Some(2.0), 6.2, 6.2, true));

@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use encodecraft_ffmpeg::{effectcraft_render_args, encode_with_stall, find_effectcraft_cli, find_ffmpeg_at, hidden_command, mezzanine_path, probe, EncodeStop};
+use encodecraft_ffmpeg::{
+    effectcraft_render_args, encode_with_stall, find_effectcraft_cli, find_ffmpeg_at, hidden_command, mezzanine_path, probe, probe_cli_caps,
+    remove_job_work_files, EncodeStop,
+};
 use encodecraft_job::JobSource;
 use encodecraft_presets::OutputFormat;
 use encodecraft_queue::{unix_ms, JobStatus};
@@ -109,6 +112,17 @@ fn dispatch(h: &Handle) {
 }
 
 fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
+    struct WorkCleanup {
+        dir: PathBuf,
+        id: String,
+    }
+    impl Drop for WorkCleanup {
+        fn drop(&mut self) {
+            remove_job_work_files(&self.dir, &self.id);
+        }
+    }
+    let _cleanup = WorkCleanup { dir: paths::work_dir(), id: id.to_string() };
+
     let stop = EncodeStop::new();
     h.register_stop(id.to_string(), stop.clone());
 
@@ -301,7 +315,9 @@ fn resolve_source(
             if let Some(dir) = out.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let args = effectcraft_render_args(&cli, &job.source, &out)?;
+            let caps = probe_cli_caps(&cli);
+            let fps = if caps.fps_flag { job.preset.video.frame_rate.output_fps() } else { None };
+            let args = effectcraft_render_args(&cli, &job.source, &out, fps)?;
             h.lock(|s| {
                 s.push_log(format!("{}: rendering EffectCraft mezzanine → {}", job.id, out.display()));
                 if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == job.id) {

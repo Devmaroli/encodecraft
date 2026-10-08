@@ -48,17 +48,19 @@ pub struct Settings {
     /// Master switch: when on, H.264 presets with `allow_gpu` use NVIDIA NVENC.
     #[serde(default)]
     pub gpu_encode: bool,
-    /// EffectCraft compositor GPU. Defaults on when an NVIDIA GPU is present; the CLI still
-    /// falls back to CPU. Separate from NVENC.
-    #[serde(default = "default_gpu_render")]
+    /// EffectCraft compositor GPU. Off by default (CPU was faster on RTX 3070 Ti). Separate from NVENC.
+    #[serde(default)]
     pub gpu_render: bool,
+    /// Bumped when a one-shot settings migration runs. Rev 1 turns leftover GPU-render-on to off.
+    #[serde(default)]
+    pub settings_rev: u32,
 }
+
+/// Current settings schema. Rev 1: GPU render defaults off for everyone.
+pub const SETTINGS_REV: u32 = 1;
 
 fn default_true() -> bool {
     true
-}
-fn default_gpu_render() -> bool {
-    encodecraft_ffmpeg::nvidia_gpu_present()
 }
 fn default_parallel() -> usize {
     2
@@ -94,7 +96,8 @@ impl Default for Settings {
             recent_preset_ids: Vec::new(),
             show_encode_preview: true,
             gpu_encode: false,
-            gpu_render: default_gpu_render(),
+            gpu_render: false,
+            settings_rev: SETTINGS_REV,
         }
     }
 }
@@ -102,8 +105,18 @@ impl Default for Settings {
 impl Settings {
     pub fn load(path: &Path) -> Self {
         let mut s: Self = crate::fsutil::load_json_or_quarantine(path).unwrap_or_default();
+        let mut dirty = false;
         if encodecraft_presets::is_legacy_default_template(&s.naming) {
             s.naming = default_template().into();
+            dirty = true;
+        }
+        if s.settings_rev < SETTINGS_REV {
+            // 0.3.0 NVIDIA-gated GPU render default left `gpu_render: true` on office PCs.
+            s.gpu_render = false;
+            s.settings_rev = SETTINGS_REV;
+            dirty = true;
+        }
+        if dirty {
             let _ = s.save(path);
         }
         s

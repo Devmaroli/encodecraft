@@ -95,8 +95,9 @@ impl Handle {
     /// Load state without background workers (unit tests, one-shot CLI helpers).
     pub fn open_core() -> Result<Self, EngineError> {
         paths::ensure_dirs()?;
+        let swept = encodecraft_ffmpeg::sweep_work_dir(&paths::work_dir());
         let session = Session::load()?;
-        Ok(Handle {
+        let h = Handle {
             session: Arc::new(Mutex::new(session)),
             stops: Arc::new(Mutex::new(HashMap::new())),
             alive: Arc::new(AtomicBool::new(true)),
@@ -105,7 +106,11 @@ impl Handle {
             rev: Arc::new(AtomicU64::new(1)),
             io: Arc::new(Mutex::new(None)),
             serve: crate::ecserve::ServePool::new(),
-        })
+        };
+        if swept > 0 {
+            h.lock(|s| s.push_log(format!("removed {swept} leftover work file(s)")));
+        }
+        Ok(h)
     }
 
     pub fn open_in(dir: PathBuf) -> Result<Self, EngineError> {
@@ -1093,15 +1098,48 @@ mod tests {
         paths::set_home(home.clone());
         let h = Handle::open_core().unwrap();
         assert!(!h.lock(|s| s.settings.gpu_encode), "GPU encode must start off");
-        let nvidia = encodecraft_ffmpeg::nvidia_gpu_present();
-        assert_eq!(h.lock(|s| s.settings.gpu_render), nvidia, "GPU render defaults on only when NVIDIA is present");
+        assert!(!h.lock(|s| s.settings.gpu_render), "GPU render must start off");
         h.lock(|s| s.settings.gpu_encode = true);
         h.persist();
         drop(h);
         let h = Handle::open_core().unwrap();
         assert!(h.lock(|s| s.settings.gpu_encode), "toolbar GPU encode is remembered");
+        assert!(!h.lock(|s| s.settings.gpu_render), "GPU render stays off unless the checkbox is turned on");
         assert!(!encodecraft_ffmpeg::use_gpu_encoder(false, true, true, true, true));
         assert!(encodecraft_ffmpeg::use_gpu_encoder(true, true, true, true, true));
+    }
+
+    #[test]
+    fn gpu_render_migrates_old_on_to_off_once() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        std::fs::write(home.join("settings.json"), r#"{"gpu_render":true}"#).unwrap();
+        let h = Handle::open_core().unwrap();
+        assert!(!h.lock(|s| s.settings.gpu_render), "rev-1 migration turns leftover GPU render off");
+        h.lock(|s| s.settings.gpu_render = true);
+        h.persist();
+        drop(h);
+        let h = Handle::open_core().unwrap();
+        assert!(h.lock(|s| s.settings.gpu_render), "an explicit On after migration is remembered");
+    }
+
+    #[test]
+    fn startup_sweeps_yuv_and_mezzanine_leftovers() {
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let work = home.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("karting-stream.yuv"), b"yuv").unwrap();
+        std::fs::write(work.join("old-mezzanine.mov"), b"moov").unwrap();
+        std::fs::write(work.join("keep.txt"), b"ok").unwrap();
+        let h = Handle::open_core().unwrap();
+        assert!(!work.join("karting-stream.yuv").exists());
+        assert!(!work.join("old-mezzanine.mov").exists());
+        assert!(work.join("keep.txt").exists());
+        let log = h.lock(|s| s.log.join("\n"));
+        assert!(log.contains("leftover work file"), "{log}");
     }
 
     #[test]

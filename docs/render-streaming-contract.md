@@ -151,12 +151,13 @@ stdout).
 
 ## Suggested EncodeCraft flow
 
-1. Start once: `effectcraft-cli serve --control 0 --gpu --idle-exit 120` with `CREATE_NO_WINDOW`.
+1. Start once: `effectcraft-cli serve --control 0 --idle-exit 120` with `CREATE_NO_WINDOW` (`--gpu` only when Settings GPU render is on).
 2. Parse `listening.port` from stderr.
 3. `project.open` the `.ecproj`.
-4. `render.start` with `out` a path (or a pipe FFmpeg already has open), `pixFmt: "yuv420p"`, optional `audioOut`.
+4. `render.start` with `out` a path (or a pipe FFmpeg already has open), `pixFmt: "yuv420p"`, optional `audioOut`, and **`fps` set to the preset output rate** (Better Res `25`) so the CLI renders that many frames over the same duration.
 5. Show `frame.n / frame.total` from the first event. Stream into x264 **pass 1** while writing a
-   cheap raw file for **pass 2** (true 2-pass; studio bitrates unchanged).
+   cheap raw file for **pass 2** (true 2-pass; studio bitrates unchanged). Delete the raw file
+   (and sidecar / WAV / leftover mezzanine) on success, failure, and cancel; sweep leftovers on startup.
 6. `render.cancel` on user stop; `app.quit` when EncodeCraft exits.
 
 Cold `render --format yuv420p --out -` is the same contract without a resident process. ProRes-to-file

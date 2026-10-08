@@ -24,18 +24,19 @@ use crate::stage::JobProgress;
 use crate::tasks::UiEvent;
 use crate::{EngineError, Handle};
 
-/// Request EffectCraft `--gpu` only when an NVIDIA GPU is present (non-RTX adapters were slower
-/// than CPU). `ENCODECRAFT_GPU_RENDER=1` forces it; `=0` turns it off. The checkbox is the rest.
-pub fn gpu_render_from(env: Option<&str>, settings_on: bool, nvidia: bool) -> bool {
+/// Settings checkbox, overridden by `ENCODECRAFT_GPU_RENDER=0/1`. Off by default — CPU render was
+/// faster than GPU on RTX 3070 Ti. EffectCraft still CPU-fallbacks if `--gpu` is passed and the
+/// adapter cannot take the frame.
+pub fn gpu_render_from(env: Option<&str>, settings_on: bool) -> bool {
     match env.map(str::trim) {
         Some("0") | Some("false") | Some("off") | Some("no") => false,
         Some("1") | Some("true") | Some("on") | Some("yes") => true,
-        _ => settings_on && nvidia,
+        _ => settings_on,
     }
 }
 
 pub fn gpu_render_enabled(settings_on: bool) -> bool {
-    gpu_render_from(std::env::var("ENCODECRAFT_GPU_RENDER").ok().as_deref(), settings_on, encodecraft_ffmpeg::nvidia_gpu_present())
+    gpu_render_from(std::env::var("ENCODECRAFT_GPU_RENDER").ok().as_deref(), settings_on)
 }
 
 pub fn job_wants_audio(preset: &ExportPreset) -> bool {
@@ -222,9 +223,7 @@ pub fn try_stream(
     }
     let settings_gpu = h.lock(|s| s.settings.gpu_render);
     let gpu = gpu_render_enabled(settings_gpu);
-    if settings_gpu && !gpu {
-        h.lock(|s| s.push_log(format!("{}: GPU render not requested (no NVIDIA; CPU is typically faster). ENCODECRAFT_GPU_RENDER=1 to force", job.id)));
-    }
+    let fps = if caps.fps_flag { job.preset.video.frame_rate.output_fps() } else { None };
     let work = paths::work_dir();
     std::fs::create_dir_all(&work)?;
     let yuv = intermediate_yuv_path(&work, &job.id);
@@ -241,15 +240,18 @@ pub fn try_stream(
         }
     });
 
+    if let Some(f) = fps {
+        h.lock(|s| s.push_log(format!("{}: render at {} fps (preset output rate)", job.id, encodecraft_ffmpeg::format_cli_fps(f))));
+    }
     if caps.serve && !serve.rendering() {
-        match stream_via_serve(h, job, &cli, gpu, &yuv, &sidecar, audio, ff, preset, stop, &mapper, started_ms, stall, serve) {
+        match stream_via_serve(h, job, &cli, gpu, fps, &yuv, &sidecar, audio, ff, preset, stop, &mapper, started_ms, stall, serve) {
             Ok(r) => return Ok(Some(r)),
             Err(e) => {
                 h.lock(|s| s.push_log(format!("{}: warm serve failed ({e}) — cold stream", job.id)));
             }
         }
     }
-    let r = stream_via_cold(h, job, &cli, gpu, &yuv, &sidecar, audio, ff, preset, stop, &mapper, started_ms, stall)?;
+    let r = stream_via_cold(h, job, &cli, gpu, fps, &yuv, &sidecar, audio, ff, preset, stop, &mapper, started_ms, stall)?;
     Ok(Some(r))
 }
 
@@ -259,6 +261,7 @@ fn stream_via_cold(
     job: &Job,
     cli: &Path,
     gpu: bool,
+    fps: Option<f64>,
     yuv: &Path,
     sidecar: &Path,
     audio: Option<&Path>,
@@ -269,7 +272,7 @@ fn stream_via_cold(
     started_ms: u64,
     stall: u64,
 ) -> Result<encodecraft_ffmpeg::EncodeResult, EngineError> {
-    let args = stream_render_args(cli, &job.source, Path::new("-"), sidecar, audio, gpu)?;
+    let args = stream_render_args(cli, &job.source, Path::new("-"), sidecar, audio, gpu, fps)?;
     let (prog, rest) = args.split_first().ok_or_else(|| EngineError::Message("empty render argv".into()))?;
     let mut child = hidden_command(prog).args(rest).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take().ok_or_else(|| EngineError::Message("render has no stdout".into()))?;
@@ -416,6 +419,7 @@ fn stream_via_serve(
     job: &Job,
     cli: &Path,
     gpu: bool,
+    fps: Option<f64>,
     yuv: &Path,
     sidecar: &Path,
     audio: Option<&Path>,
@@ -446,6 +450,9 @@ fn stream_via_serve(
     }
     if let Some(a) = audio {
         params["audioOut"] = json!(a);
+    }
+    if let Some(f) = fps {
+        params["fps"] = json!(f);
     }
 
     let mut header: Option<StreamHeader> = None;
@@ -549,13 +556,12 @@ mod tests {
 
     #[test]
     fn gpu_render_env_overrides_settings() {
-        assert!(gpu_render_from(None, true, true));
-        assert!(!gpu_render_from(None, true, false), "non-NVIDIA adapters stay on CPU");
-        assert!(!gpu_render_from(None, false, true));
-        assert!(!gpu_render_from(Some("0"), true, true));
-        assert!(!gpu_render_from(Some("off"), true, true));
-        assert!(gpu_render_from(Some("1"), false, false), "env forces GPU even without NVIDIA");
-        assert!(gpu_render_from(Some("on"), false, false));
+        assert!(gpu_render_from(None, true), "checkbox on");
+        assert!(!gpu_render_from(None, false), "checkbox off (default)");
+        assert!(!gpu_render_from(Some("0"), true));
+        assert!(!gpu_render_from(Some("off"), true));
+        assert!(gpu_render_from(Some("1"), false), "env forces GPU");
+        assert!(gpu_render_from(Some("on"), false));
         assert!(!gpu_render_enabled(false));
     }
 

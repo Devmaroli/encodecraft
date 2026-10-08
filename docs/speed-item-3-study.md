@@ -46,9 +46,9 @@ Office-PC **before** (this branch, ProRes HQ mezzanine then x264 medium):
 | --- | --- |
 | `yuv420p` stream into x264 pass 1 + raw file for pass 2 | Wired. Better Res stays **2-pass** 2/6.2/6.2. |
 | Warm `effectcraft-cli serve` | On demand, reused, `--idle-exit 120`, `app.quit` on EncodeCraft exit, `CREATE_NO_WINDOW`. |
-| GPU render | On by default **when NVIDIA is present**; otherwise CPU (non-RTX adapters were slower). CLI still CPU-fallbacks if the frame does not fit. Settings checkbox; `ENCODECRAFT_GPU_RENDER=0/1`. NVENC stays a separate Off switch. This VM has no GPU and no `effectcraft-cli`, so GPU vs CPU was not measured here. |
+| GPU render | **Off** by default (office RTX 3070 Ti: CPU render 21–22 s vs GPU 24 s + ~10 s first-time GPU startup). Settings checkbox; `ENCODECRAFT_GPU_RENDER=0/1`. CLI still CPU-fallbacks if the frame does not fit. NVENC stays a separate Off switch. |
 | One ultra-wide / 4K+ job at a time | Dispatch skips a second heavy raster. Other jobs still run in parallel. |
 | Old CLI | ProRes mezzanine fallback. |
 | Adaptive parallel / x264 thread tune | Still not implemented. |
 
-Office-PC **after** wall time for 6880×1032 / 10 s Better Res: **not remeasured here** (this VM has no EffectCraft project or RTX). Expected win vs **84 s** is dropping the ProRes HQ write/read and overlapping pass 1 with the render. Re-run that clip on the office installer to fill the after number.
+Office-PC **after** (EncodeCraft 0.3.0 + EffectCraft PR #12, i7 8C/16T, 64 GB, RTX 3070 Ti): Karting 6880×1032 Better Res **34–43 s** (was ~84 s). Stream path every time, true 2-pass, first progress 1–6 s. Follow-up on this branch: delete `*-stream.yuv` / `*-mezzanine.*` always and on startup; GPU render **off** by default; pass preset `--fps` (25) so EffectCraft renders 250 frames instead of 300; cache CLI `--help` probes by exe path + mtime.

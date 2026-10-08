@@ -7,9 +7,13 @@ instead of encoding inside AE. EncodeCraft offers the same split:
 2. EncodeCraft owns delivery presets, DOOH screen packs, the queue, watch folders, FFmpeg.
 
 The handoff is a small JSON job (crate `encodecraft-job`). EncodeCraft then **streams `yuv420p`
-frames** from `effectcraft-cli` into FFmpeg (warm `serve` when the CLI is new enough). True x264
-2-pass is kept: pass 1 reads the live pipe while a raw file is written for pass 2. If the installed
-CLI is too old for `yuv420p` / `serve`, EncodeCraft falls back to `render --format prores --out FILE`.
+frames** from `effectcraft-cli` into FFmpeg (warm `serve` when the CLI is new enough) at the
+**preset output frame rate** (`--fps N` / serve `fps`, contract v1 — Better Res asks for 25 fps
+over the same duration so FFmpeg does not drop frames). True x264 2-pass is kept: pass 1 reads
+the live pipe while a raw file is written for pass 2, then **deleted** (also on failure/cancel;
+startup sweeps leftover `*-stream.yuv` and `*-mezzanine.*`). If the installed CLI is too old for
+`yuv420p` / `serve`, EncodeCraft falls back to `render --format prores --out FILE`. CLI `--help`
+probes are cached by executable path and mtime.
 
 Contract: [`render-streaming-contract.md`](render-streaming-contract.md).
 

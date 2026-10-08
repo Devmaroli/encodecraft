@@ -36,9 +36,9 @@ pub use run::{
     thumbnail_png, wait_spawned_plan, EncodeResult, EncodeStop, SpawnedPlan, DEFAULT_STALL_SECS,
 };
 pub use stream::{
-    audio_wav_path, caps_from_help, intermediate_yuv_path, is_heavy_raster, load_sidecar, parse_stream_event, probe_cli_caps, read_exact_frame,
-    read_growing_file, serve_args, sidecar_path, stream_render_args, yuv420p_bytes_per_frame, CliCaps, RawVideoInput, StreamEvent, StreamHeader, HEAVY_ASPECT,
-    HEAVY_PIXELS,
+    audio_wav_path, caps_from_help, format_cli_fps, intermediate_yuv_path, is_heavy_raster, is_work_leftover, load_sidecar, parse_stream_event, probe_cli_caps,
+    probe_cli_caps_uncached, read_exact_frame, read_growing_file, remove_job_work_files, serve_args, sidecar_path, stream_render_args, sweep_work_dir,
+    yuv420p_bytes_per_frame, CliCaps, RawVideoInput, StreamEvent, StreamHeader, HEAVY_ASPECT, HEAVY_PIXELS,
 };
 
 use encodecraft_job::JobSource;
@@ -69,7 +69,12 @@ pub enum FfmpegError {
 
 /// Fallback argv: ProRes/PNG mezzanine when the installed EffectCraft CLI is too old to stream
 /// `yuv420p`. New CLIs use [`stream_render_args`] / the warm `serve` process instead.
-pub fn effectcraft_render_args(cli: &std::path::Path, source: &JobSource, mezzanine_out: &std::path::Path) -> Result<Vec<String>, FfmpegError> {
+pub fn effectcraft_render_args(
+    cli: &std::path::Path,
+    source: &JobSource,
+    mezzanine_out: &std::path::Path,
+    fps: Option<f64>,
+) -> Result<Vec<String>, FfmpegError> {
     match source {
         JobSource::EffectCraft { project, comp, mezzanine, work_area, .. } => {
             let mut args = vec![
@@ -88,6 +93,10 @@ pub fn effectcraft_render_args(cli: &std::path::Path, source: &JobSource, mezzan
             }
             if *work_area {
                 args.push("--work-area".into());
+            }
+            if let Some(f) = fps.filter(|f| f.is_finite() && *f > 0.1) {
+                args.push("--fps".into());
+                args.push(format_cli_fps(f));
             }
             Ok(args)
         }
@@ -121,10 +130,11 @@ mod tests {
             width: None,
             height: None,
         };
-        let args = effectcraft_render_args(std::path::Path::new("/bin/effectcraft-cli"), &src, std::path::Path::new("/tmp/m.mov")).unwrap();
+        let args = effectcraft_render_args(std::path::Path::new("/bin/effectcraft-cli"), &src, std::path::Path::new("/tmp/m.mov"), Some(25.0)).unwrap();
         assert!(args.windows(2).any(|w| w[0] == "--project" && w[1].ends_with("main.ecproj")));
         assert!(args.windows(2).any(|w| w[0] == "--comp" && w[1] == "Main"));
         assert!(args.iter().any(|a| a == "--work-area"));
         assert!(args.windows(2).any(|w| w[0] == "--format" && w[1] == "prores"));
+        assert!(args.windows(2).any(|w| w[0] == "--fps" && w[1] == "25"), "{args:?}");
     }
 }

@@ -912,6 +912,7 @@ dependencies = [
  "encodecraft-presets",
  "encodecraft-queue",
  "getrandom 0.2.17",
+ "image",
  "log",
  "serde",
  "serde_json",

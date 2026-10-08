@@ -16,7 +16,7 @@ pub fn run(h: Handle) {
     while h.is_alive() {
         thread::sleep(Duration::from_millis(250));
         ticks = ticks.wrapping_add(1);
-        if ticks % 20 == 0 {
+        if ticks % 4 == 0 && h.take_dirty() {
             h.persist();
         }
         dispatch(&h);
@@ -45,6 +45,7 @@ fn dispatch(h: &Handle) {
             j.error = None;
         }
     });
+    h.note_change();
     let handle = h.clone();
     let job_id = id.clone();
     let _ = thread::Builder::new().name(format!("encode-{id}")).spawn(move || {
@@ -77,7 +78,8 @@ fn dispatch(h: &Handle) {
             }
         });
         handle.unregister_stop(&job_id);
-        handle.persist();
+        handle.note_change();
+        handle.mark_dirty();
     });
 }
 
@@ -120,6 +122,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
     let hid = id.to_string();
     let h_prog = h.clone();
     let h_log = h.clone();
+    let last_prog = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
     let stall = h.lock(|s| s.settings.stall_timeout_sec).max(15);
     let sequence_start = match &job.source {
         JobSource::File { sequence_start, .. } => *sequence_start,
@@ -137,11 +140,17 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
         stall,
         |p| {
             let snap = encodecraft_queue::ProgressSnap::from(p);
+            let mut last = last_prog.lock().unwrap_or_else(|p| p.into_inner());
+            if last.elapsed() < std::time::Duration::from_millis(120) && !p.done {
+                return;
+            }
+            *last = std::time::Instant::now();
             h_prog.lock(|s| {
                 if let Some(j) = s.queue.jobs.iter_mut().find(|j| j.id == hid) {
-                    j.progress = snap.clone();
+                    j.progress = snap;
                 }
             });
+            h_prog.note_change();
         },
         |line| {
             let line = line.to_string();

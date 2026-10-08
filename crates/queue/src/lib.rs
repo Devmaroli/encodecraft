@@ -85,6 +85,11 @@ pub struct Job {
     /// Output name still has unresolved `{width}`/`{height}` (`srcxsrc`).
     #[serde(default)]
     pub size_name_pending: bool,
+    /// True until ffprobe / .ecproj size fills in. The queue row shows a spinner.
+    #[serde(default)]
+    pub metadata_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>,
     pub status: JobStatus,
     #[serde(default)]
     pub progress: ProgressSnap,
@@ -115,6 +120,11 @@ impl From<&EncodeProgress> for ProgressSnap {
 }
 
 impl Job {
+    /// Clone for the UI list: skip the encode log so 1,000-row snapshots stay cheap.
+    pub fn for_ui(&self) -> Self {
+        Self { log: String::new(), ..self.clone() }
+    }
+
     /// Fill match-source dimensions and rebuild `{width}x{height}` once the real size is known.
     /// Returns true if the output path changed.
     pub fn apply_resolved_size(&mut self, width: u32, height: u32, allow_overwrite: bool) -> bool {
@@ -494,6 +504,8 @@ impl EncodeQueue {
                 }
             }
             claimed.push(output.clone());
+            let size_name_pending = w == 0 || h == 0;
+            let metadata_pending = size_name_pending || matches!(req.source, JobSource::File { .. });
             jobs.push(Job {
                 id,
                 source: req.source.clone(),
@@ -506,7 +518,9 @@ impl EncodeQueue {
                 preset_overridden,
                 encode_warning,
                 naming: naming.to_string(),
-                size_name_pending: w == 0 || h == 0,
+                size_name_pending,
+                metadata_pending,
+                duration_sec: None,
                 status: if req.start_queue { JobStatus::Waiting } else { JobStatus::Paused },
                 progress: ProgressSnap::default(),
                 log: String::new(),
@@ -608,6 +622,23 @@ mod tests {
             scale: Some(ScaleMode::Fit),
             start_queue: false,
         }
+    }
+
+    #[test]
+    fn seed_1000_outputs_stays_under_half_second() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        let t0 = std::time::Instant::now();
+        for g in 0..16 {
+            let mut req = req_many();
+            req.source = JobSource::file(format!("/ads/g{g}.mp4"));
+            req.sizes = (0..64).map(|i| ScreenSize::new(format!("{g}-{i}"), 1920, 1080)).collect();
+            q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", true, false).unwrap();
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(q.jobs.len(), 1024);
+        eprintln!("seed 1024 outputs: {ms:.2} ms");
+        assert!(ms < 500.0, "seeding 1,024 outputs took {ms:.1} ms");
     }
 
     #[test]

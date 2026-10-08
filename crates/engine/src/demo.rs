@@ -120,6 +120,50 @@ pub fn seed_preset_ui_demo(session: &mut Session) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Seed `n` outputs for virtualization / frame-time benches.
+pub fn seed_stress_queue(session: &mut Session, n: usize) -> Result<(), EngineError> {
+    session.queue.jobs.clear();
+    session.queue.running = false;
+    let project = PathBuf::from(r"D:\Jobs\Stress\stress.ecproj");
+    let chunk = 64usize;
+    let mut left = n;
+    let mut g = 0u32;
+    while left > 0 {
+        let take = left.min(chunk);
+        let sizes: Vec<ScreenSize> = (0..take)
+            .map(|i| ScreenSize::new(format!("Screen {g}-{}", i + 1), 1920, 1080))
+            .collect();
+        let req = EnqueueRequest {
+            schema: 1,
+            source: JobSource::EffectCraft {
+                project: project.clone(),
+                comp: Some(format!("Comp_{g}")),
+                mezzanine: "prores".into(),
+                work_area: false,
+                width: Some(1920),
+                height: Some(1080),
+            },
+            preset_id: "auto".into(),
+            preset_override: None,
+            output_dir: Some(PathBuf::from(r"D:\Jobs\Stress\Output")),
+            naming: Some("{name}_{width}x{height}".into()),
+            sizes,
+            trim: None,
+            scale: None,
+            start_queue: false,
+        };
+        session.queue.enqueue(&req, &session.presets, &PathBuf::from(r"D:\Jobs\Stress\Output"), "{name}_{width}x{height}", true, false)?;
+        left = left.saturating_sub(take);
+        g = g.saturating_add(1);
+    }
+    for j in &mut session.queue.jobs {
+        j.status = JobStatus::Waiting;
+        j.metadata_pending = false;
+    }
+    session.selected = session.queue.jobs.first().map(|j| j.id.clone());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -42,13 +42,13 @@ pub struct SourceGroup {
 impl EncodeApp {
     pub fn queue_panel_ux(&mut self, ui: &mut Ui) {
         let t = self.t();
-        let jobs: Vec<Job> = self.handle.lock(|s| s.queue.jobs.clone());
+        let jobs = self.jobs_cache.clone();
         let groups = group_jobs(&jobs);
         let (better, inst) = studio_counts(&jobs);
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("Queue").strong().size(14.0));
-            let idle = self.handle.lock(|s| !s.queue.running);
+            let idle = !self.queue_running;
             ui.label(RichText::new(format!("{} item{} · {}", jobs.len(), if jobs.len() == 1 { "" } else { "s" }, if idle { "Idle" } else { "running" })).color(t.text_dim));
             if better + inst > 0 {
                 ui.separator();
@@ -76,16 +76,28 @@ impl EncodeApp {
 
         let order: Vec<String> = groups.iter().flat_map(|g| g.job_ids.clone()).collect();
         let mut geoms: Vec<QueueGeom> = Vec::new();
-        egui::ScrollArea::vertical().id_salt("queue-scroll").show(ui, |ui| {
-            for g in &groups {
-                self.source_row(ui, g, &jobs, &order, &mut geoms);
-                if self.collapsed.contains(&g.key) {
-                    continue;
+        enum FlatRow<'a> {
+            Source(&'a SourceGroup),
+            Output(&'a Job),
+        }
+        let mut flat: Vec<FlatRow<'_>> = Vec::with_capacity(jobs.len().saturating_add(groups.len()));
+        for g in &groups {
+            flat.push(FlatRow::Source(g));
+            if self.collapsed.contains(&g.key) {
+                continue;
+            }
+            for id in &g.job_ids {
+                if let Some(job) = jobs.iter().find(|j| j.id == *id) {
+                    flat.push(FlatRow::Output(job));
                 }
-                for id in &g.job_ids {
-                    if let Some(job) = jobs.iter().find(|j| j.id == *id) {
-                        self.output_row(ui, job, &order, &jobs, &mut geoms);
-                    }
+            }
+        }
+        const ROW_H: f32 = 36.0;
+        egui::ScrollArea::vertical().id_salt("queue-scroll").show_rows(ui, ROW_H, flat.len(), |ui, range| {
+            for i in range {
+                match flat[i] {
+                    FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
+                    FlatRow::Output(job) => self.output_row(ui, job, &order, &jobs, &mut geoms),
                 }
             }
         });
@@ -134,7 +146,7 @@ impl EncodeApp {
                 match self.handle.lock(|s| s.add_output_with_preset(like, pid.as_str())) {
                     Ok(_) => {
                         self.status = format!("Added output with {}", pid);
-                        self.handle.persist();
+                        self.handle.mark_dirty();
                     }
                     Err(e) => self.status = e.to_string(),
                 }
@@ -282,7 +294,7 @@ impl EncodeApp {
                 let reset = ui.add(egui::Label::new(RichText::new("↺ Auto").color(t.accent).size(11.0)).sense(Sense::click()));
                 if reset.clicked() {
                     let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job.id.clone()]));
-                    self.handle.persist();
+                    self.handle.mark_dirty();
                 }
             }
         });
@@ -302,7 +314,12 @@ impl EncodeApp {
             self.reveal_in_explorer(&job.output);
         }
         let mut st_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.status).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        st_ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
+        st_ui.horizontal(|ui| {
+            if job.metadata_pending {
+                ui.add(egui::Spinner::new().size(11.0));
+            }
+            ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
+        });
 
         let jid = job.id.clone();
         out_r.context_menu(|ui| {
@@ -365,7 +382,7 @@ impl EncodeApp {
         }
         if ui.button("Reset preset to Auto").clicked() {
             let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job_id.to_string()]));
-            self.handle.persist();
+            self.handle.mark_dirty();
             ui.close();
         }
         if ui.button("Remove").clicked() {
@@ -407,7 +424,7 @@ impl EncodeApp {
                     order: None,
                     until: Instant::now() + Duration::from_secs(8),
                 });
-                self.handle.persist();
+                self.handle.mark_dirty();
             }
             Ok(_) => {}
             Err(e) => self.status = e.to_string(),
@@ -465,7 +482,7 @@ impl EncodeApp {
                 self.handle.lock(|s| s.restore_preset_snapshot(&t.snapshot));
                 self.status = "Undid preset apply".into();
             }
-            self.handle.persist();
+            self.handle.mark_dirty();
         }
     }
 
@@ -486,7 +503,7 @@ impl EncodeApp {
                     order: Some(before),
                     until: Instant::now() + Duration::from_secs(8),
                 });
-                self.handle.persist();
+                self.handle.mark_dirty();
             }
             Err(e) => self.status = e.to_string(),
         }
@@ -625,7 +642,7 @@ impl EncodeApp {
                         let lab = format!("Auto choice for this screen: {name} ({})", pick.reason.label());
                         if ui.selectable_label(!job.preset_overridden, lab).clicked() {
                             let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job_id.clone()]));
-                            self.handle.persist();
+                            self.handle.mark_dirty();
                             self.preset_popup_for = None;
                         }
                     }
@@ -728,13 +745,13 @@ impl EncodeApp {
         p.group.clear();
         if let Some(_path) = name {
             let _ = self.handle.lock(|s| s.presets.upsert_user(p.clone()));
-            self.handle.persist();
+            self.handle.mark_dirty();
             self.status = format!("Saved user preset {}", p.name);
         } else if let Some(n) = prompt_fallback(&p.name) {
             p.name = n;
             p.id = format!("user.{}", sanitize(&p.name));
             let _ = self.handle.lock(|s| s.presets.upsert_user(p.clone()));
-            self.handle.persist();
+            self.handle.mark_dirty();
         }
     }
 
@@ -754,38 +771,46 @@ impl EncodeApp {
         }
         let presets = self.handle.lock(|s| s.presets.all());
         let browsing = self.browser_selected.clone();
-        egui::ScrollArea::vertical().id_salt("preset-scroll").max_height(ui.available_height() - 160.0).show(ui, |ui| {
-            ui.label(RichText::new("★ Studio").small().color(t.text_faint).strong());
-            for p in presets.iter().filter(|p| PresetLibrary::is_studio_system(&p.id)) {
-                if !filter_preset(p, &filter) {
-                    continue;
-                }
-                self.browser_item(ui, p, browsing.as_deref());
+        enum PresetRow<'a> {
+            Header(&'static str),
+            Item(&'a ExportPreset),
+        }
+        let mut rows: Vec<PresetRow<'_>> = Vec::new();
+        rows.push(PresetRow::Header("Studio"));
+        for p in presets.iter().filter(|p| PresetLibrary::is_studio_system(&p.id)) {
+            if filter_preset(p, &filter) {
+                rows.push(PresetRow::Item(p));
             }
-            ui.add_space(6.0);
-            ui.label(RichText::new("User Presets & Groups").small().color(t.text_faint).strong());
-            let mut groups: Vec<String> = presets.iter().filter(|p| p.kind == PresetKind::User && !p.group.is_empty()).map(|p| p.group.clone()).collect();
-            groups.sort();
-            groups.dedup();
-            for g in &groups {
-                ui.collapsing(g.clone(), |ui| {
-                    for p in presets.iter().filter(|p| p.kind == PresetKind::User && p.group == *g) {
-                        if filter_preset(p, &filter) {
-                            self.browser_item(ui, p, browsing.as_deref());
-                        }
+        }
+        rows.push(PresetRow::Header("User Presets & Groups"));
+        let mut groups: Vec<String> = presets.iter().filter(|p| p.kind == PresetKind::User && !p.group.is_empty()).map(|p| p.group.clone()).collect();
+        groups.sort();
+        groups.dedup();
+        for g in &groups {
+            for p in presets.iter().filter(|p| p.kind == PresetKind::User && p.group == *g) {
+                if filter_preset(p, &filter) {
+                    rows.push(PresetRow::Item(p));
+                }
+            }
+        }
+        for p in presets.iter().filter(|p| p.kind == PresetKind::User && p.group.is_empty()) {
+            if filter_preset(p, &filter) {
+                rows.push(PresetRow::Item(p));
+            }
+        }
+        rows.push(PresetRow::Header("System Presets"));
+        for p in presets.iter().filter(|p| p.kind == PresetKind::System && !PresetLibrary::is_studio_system(&p.id)) {
+            if filter_preset(p, &filter) {
+                rows.push(PresetRow::Item(p));
+            }
+        }
+        egui::ScrollArea::vertical().id_salt("preset-scroll").max_height(ui.available_height() - 160.0).show_rows(ui, 22.0, rows.len(), |ui, range| {
+            for i in range {
+                match rows[i] {
+                    PresetRow::Header(h) => {
+                        ui.label(RichText::new(h).small().color(t.text_faint).strong());
                     }
-                });
-            }
-            for p in presets.iter().filter(|p| p.kind == PresetKind::User && p.group.is_empty()) {
-                if filter_preset(p, &filter) {
-                    self.browser_item(ui, p, browsing.as_deref());
-                }
-            }
-            ui.add_space(6.0);
-            ui.label(RichText::new("System Presets").small().color(t.text_faint).strong());
-            for p in presets.iter().filter(|p| p.kind == PresetKind::System && !PresetLibrary::is_studio_system(&p.id)) {
-                if filter_preset(p, &filter) {
-                    self.browser_item(ui, p, browsing.as_deref());
+                    PresetRow::Item(p) => self.browser_item(ui, p, browsing.as_deref()),
                 }
             }
         });
@@ -989,7 +1014,7 @@ impl EncodeApp {
                 p.kind = PresetKind::User;
                 p.id = format!("user.{}", sanitize(&p.name));
                 let _ = self.handle.lock(|s| s.presets.upsert_user(p));
-                self.handle.persist();
+                self.handle.mark_dirty();
                 self.status = "Saved as user preset".into();
             }
         }
@@ -1015,7 +1040,7 @@ impl EncodeApp {
                     }
                     Err(e) => self.status = e.to_string(),
                 }
-                self.handle.persist();
+                self.handle.mark_dirty();
             }
             open = false;
         }
@@ -1123,12 +1148,12 @@ impl EncodeApp {
             ui.horizontal(|ui| {
                 if ui.button("Re-apply to Auto rows  ·  Manual rows stay").clicked() {
                     self.handle.lock(|s| s.queue.reapply_auto_rows(&s.presets.clone()));
-                    self.handle.persist();
+                    self.handle.mark_dirty();
                     self.status = "Re-applied Auto rows".into();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(egui::Button::new("Save rules").fill(t.accent)).clicked() {
-                        self.handle.persist();
+                        self.handle.mark_dirty();
                         self.status = "Rules saved".into();
                         close = true;
                     }
@@ -1165,10 +1190,6 @@ impl EncodeApp {
 
 fn group_has_locked(g: &SourceGroup, jobs: &[Job]) -> bool {
     g.job_ids.iter().any(|id| jobs.iter().any(|j| j.id == *id && j.status.is_order_locked()))
-}
-
-fn pointer_top_half(ui: &Ui, rect: Rect) -> bool {
-    ui.input(|i| i.pointer.hover_pos()).map(|p| p.y < rect.center().y).unwrap_or(true)
 }
 
 fn rest_ids(jobs: &[Job], moving: &[String]) -> Vec<String> {

@@ -2,6 +2,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod panels;
+mod perf;
 mod theme;
 mod ux;
 
@@ -10,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
-use encodecraft_engine::{classify_dropped_paths, list_ecproj_compositions_file, seed_preset_ui_demo, DropOutcome, Handle};
+use encodecraft_engine::{classify_dropped_paths, seed_preset_ui_demo, seed_stress_queue, DropOutcome, Handle, IoCmd, UiEvent};
 use encodecraft_job::{ScaleMode, PRODUCT};
 use encodecraft_presets::{ExportPreset, FrameRate, OutputFormat, PresetReason, Quality};
 use encodecraft_queue::{Job, JobStatus};
@@ -46,6 +48,15 @@ pub struct EncodeApp {
     pub(crate) try_result: Option<String>,
     pub(crate) rules_new_ultra: String,
     pub(crate) show_screen_picker: bool,
+    pub(crate) jobs_cache: Vec<Job>,
+    snap_rev: u64,
+    last_snap: Instant,
+    queue_running: bool,
+    ffmpeg_ok: bool,
+    ffmpeg_msg: String,
+    thumb_inflight: HashSet<String>,
+    perf: perf::PerfHud,
+    bench: Option<perf::BenchRun>,
 }
 
 struct EcprojPicker {
@@ -68,6 +79,20 @@ impl EncodeApp {
     pub fn new(handle: Handle) -> Self {
         if std::env::var("ENCODECRAFT_DEMO").ok().as_deref() == Some("1") {
             let _ = handle.lock(|s| seed_preset_ui_demo(s));
+        }
+        if let Ok(raw) = std::env::var("ENCODECRAFT_BENCH") {
+            let n = std::env::var("ENCODECRAFT_BENCH_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let _ = handle.lock(|s| seed_stress_queue(s, n));
+            if raw == "encode2" {
+                handle.lock(|s| {
+                    s.queue.running = true;
+                    for (i, j) in s.queue.jobs.iter_mut().take(2).enumerate() {
+                        j.status = JobStatus::Encoding;
+                        j.progress.percent = 10.0 + (i as f32) * 20.0;
+                        j.progress.speed = 1.2;
+                    }
+                });
+            }
         }
         let selected = handle.lock(|s| s.selected.clone());
         Self {
@@ -99,11 +124,94 @@ impl EncodeApp {
             try_result: None,
             rules_new_ultra: String::new(),
             show_screen_picker: false,
+            jobs_cache: Vec::new(),
+            snap_rev: 0,
+            last_snap: Instant::now(),
+            queue_running: false,
+            ffmpeg_ok: true,
+            ffmpeg_msg: String::new(),
+            thumb_inflight: HashSet::new(),
+            perf: perf::PerfHud::default(),
+            bench: perf::BenchRun::from_env(),
         }
     }
 
     pub(crate) fn t(&self) -> Tokens {
         self.tokens
+    }
+
+    fn poll_background(&mut self, ctx: &egui::Context) {
+        for ev in self.handle.poll_ui_events() {
+            match ev {
+                UiEvent::Changed => {
+                    self.snap_rev = 0;
+                }
+                UiEvent::Thumb { id, rgba, w, h } => {
+                    self.thumb_inflight.remove(&id);
+                    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                    let tex = ctx.load_texture(format!("th-{id}"), color, egui::TextureOptions::LINEAR);
+                    self.thumb_tex.insert(id, tex);
+                }
+                UiEvent::Ecproj { path, comps, note } => {
+                    let selected = if comps.is_empty() { Vec::new() } else { vec![true; comps.len()] };
+                    self.ecproj_picker = Some(EcprojPicker { path, comps, selected, custom: String::new(), parse_note: note });
+                }
+                UiEvent::Dropped(outcome) => {
+                    self.apply_drop_outcome(outcome, 0);
+                }
+                UiEvent::Slow { name, ms } => self.perf.push_slow(&name, ms),
+            }
+        }
+    }
+
+    fn refresh_snapshot(&mut self) {
+        let rev = self.handle.revision();
+        let encoding = self.jobs_cache.iter().any(|j| j.status.is_active());
+        let due = encoding && self.last_snap.elapsed() >= Duration::from_millis(120);
+        if rev == self.snap_rev && !due && !self.jobs_cache.is_empty() {
+            return;
+        }
+        let (jobs, running, ff) = self.handle.lock(|s| {
+            (
+                s.queue.jobs.iter().map(Job::for_ui).collect::<Vec<_>>(),
+                s.queue.running,
+                match &s.ffmpeg {
+                    Ok(f) => (true, f.ok_message()),
+                    Err(e) => (false, e.to_string()),
+                },
+            )
+        });
+        self.jobs_cache = jobs;
+        self.queue_running = running;
+        self.ffmpeg_ok = ff.0;
+        self.ffmpeg_msg = ff.1;
+        self.snap_rev = rev;
+        self.last_snap = Instant::now();
+    }
+
+    fn schedule_repaint(&self, ctx: &egui::Context) {
+        if egui::DragAndDrop::payload::<ux::QueueDrag>(ctx).is_some() {
+            ctx.request_repaint();
+            return;
+        }
+        let encoding = self.jobs_cache.iter().any(|j| j.status.is_active()) || self.queue_running;
+        let pending_meta = self.jobs_cache.iter().any(|j| j.metadata_pending);
+        let toast = self.toast.as_ref().map(|t| t.until.saturating_duration_since(Instant::now()));
+        if encoding {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        } else if pending_meta {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        } else if let Some(left) = toast {
+            if !left.is_zero() {
+                ctx.request_repaint_after(left.min(Duration::from_millis(250)));
+            }
+        }
+        if self.bench.is_some() {
+            ctx.request_repaint();
+        }
+        if self.perf.enabled {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 }
 
@@ -113,12 +221,11 @@ impl eframe::App for EncodeApp {
             self.handle.shutdown();
             std::process::exit(0);
         }
+        self.perf.begin_frame();
         theme::apply(ctx, &self.tokens);
-        if egui::DragAndDrop::payload::<ux::QueueDrag>(ctx).is_some() {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        }
+        self.poll_background(ctx);
+        self.refresh_snapshot();
+        self.schedule_repaint(ctx);
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
             self.undo_toast();
@@ -131,33 +238,28 @@ impl eframe::App for EncodeApp {
         }
         self.ingest_drops(ctx);
         self.drop_overlay(ctx);
-        if self.last_persist.elapsed() > std::time::Duration::from_secs(4) {
-            self.handle.persist();
-            self.last_persist = std::time::Instant::now();
-        }
 
         self.menu(ctx);
         self.toolbar(ctx);
         let t = self.t();
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.app_bg)).show(ctx, |ui| {
-            let avail = ui.available_size();
-            let bottom_h = (avail.y * 0.34).clamp(180.0, 320.0);
-            let top_h = avail.y - bottom_h - 4.0;
-            ui.allocate_ui(Vec2::new(avail.x, top_h), |ui| {
-                egui::SidePanel::right("presets")
-                    .resizable(true)
-                    .default_width(280.0)
-                    .width_range(200.0..=420.0)
-                    .frame(egui::Frame::NONE.fill(t.panel_bg).inner_margin(8.0))
-                    .show_inside(ui, |ui| self.preset_browser_ux(ui));
-                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.app_bg).inner_margin(6.0)).show_inside(ui, |ui| self.queue_panel_ux(ui));
-            });
-            ui.separator();
-            ui.allocate_ui(Vec2::new(avail.x, bottom_h), |ui| self.bottom(ui));
+            self.show_workspace(ui);
         });
         self.drop_notice_banner(ctx);
         self.ffmpeg_banner(ctx);
         self.dialogs(ctx);
+        self.perf.end_frame();
+        self.perf.show(ctx);
+        if let Some(bench) = self.bench.as_mut() {
+            bench.record(Duration::from_secs_f32((self.perf.last_ms / 1000.0).max(0.0)));
+            if bench.remaining == 0 {
+                let done = self.bench.take();
+                if let Some(b) = done {
+                    b.report_and_exit();
+                }
+            }
+        }
+        let _ = t;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -186,8 +288,23 @@ impl EncodeApp {
             self.set_drop_notice("That drop had no file path. Save the EffectCraft project and drop the .ecproj from Explorer, or drop media files.");
             return;
         }
-        let outcome = classify_dropped_paths(&paths);
-        self.apply_drop_outcome(outcome, nameless);
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        for p in paths {
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+        if !dirs.is_empty() {
+            self.handle.submit_io(IoCmd::Classify(dirs));
+        }
+        if !files.is_empty() {
+            self.apply_drop_outcome(classify_dropped_paths(&files), nameless);
+        } else if nameless > 0 {
+            self.set_drop_notice("Some dropped items had no file path and were skipped.");
+        }
     }
 
     fn apply_drop_outcome(&mut self, outcome: DropOutcome, nameless: usize) {
@@ -195,7 +312,11 @@ impl EncodeApp {
         let mut bits = Vec::new();
         if !outcome.media.is_empty() || !outcome.sequences.is_empty() {
             match self.handle.lock(|s| s.add_drop_outcome(&outcome, &preset)) {
-                Ok(ids) => bits.push(format!("Queued {} media item(s)", ids.len())),
+                Ok(ids) => {
+                    self.handle.note_change();
+                    self.handle.schedule_probe(ids.clone());
+                    bits.push(format!("Queued {} media item(s)", ids.len()));
+                }
                 Err(e) => self.set_drop_notice(format!("Could not queue dropped media: {e}")),
             }
         }
@@ -216,13 +337,14 @@ impl EncodeApp {
         let Some(path) = projects.into_iter().next() else {
             return;
         };
-        let (comps, parse_note) = match list_ecproj_compositions_file(&path) {
-            Ok(c) if c.is_empty() => (Vec::new(), Some("Could not list compositions in this project. Queue with EffectCraft’s default/first comp, or type a name.".into())),
-            Ok(c) => (c, None),
-            Err(e) => (Vec::new(), Some(format!("Could not read project ({e}). Queue with the default composition, or type a name."))),
-        };
-        let selected = if comps.is_empty() { Vec::new() } else { vec![true; comps.len()] };
-        self.ecproj_picker = Some(EcprojPicker { path, comps, selected, custom: String::new(), parse_note });
+        self.ecproj_picker = Some(EcprojPicker {
+            path: path.clone(),
+            comps: Vec::new(),
+            selected: Vec::new(),
+            custom: String::new(),
+            parse_note: Some("Reading project…".into()),
+        });
+        self.handle.submit_io(IoCmd::ListEcproj(path));
     }
 
     fn set_drop_notice(&mut self, msg: impl Into<String>) {
@@ -347,13 +469,15 @@ impl EncodeApp {
             ctx,
             |ui| {
                 ui.horizontal(|ui| {
-                    let running = self.handle.lock(|s| s.queue.running);
+                    let running = self.queue_running;
                     let start = egui::Button::new(if running { "  Queue running  " } else { "  Start queue  " });
                     if ui.add(start.fill(if running { t.cache_green } else { t.accent })).clicked() {
                         self.handle.lock(|s| s.queue.start());
+                        self.handle.note_change();
                     }
                     if ui.button("  Pause  ").clicked() {
                         self.handle.lock(|s| s.queue.running = false);
+                        self.handle.note_change();
                     }
                     if ui.button("  Stop  ").clicked() {
                         self.handle.stop_all();
@@ -366,12 +490,14 @@ impl EncodeApp {
                         if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
                             if let Ok(n) = self.handle.lock(|s| s.queue.duplicate(&id)) {
                                 self.handle.lock(|s| s.selected = Some(n));
+                                self.handle.note_change();
                             }
                         }
                     }
                     if ui.button("Remove").clicked() {
                         if let Some(id) = self.handle.lock(|s| s.selected.clone()) {
                             let _ = self.handle.lock(|s| s.queue.remove(&id));
+                            self.handle.note_change();
                         }
                     }
                     if ui.button("  Up  ").on_hover_text("Move selected rows up (Alt+↑)").clicked() {
@@ -591,6 +717,7 @@ impl EncodeApp {
                 *j = job;
             }
         });
+        self.handle.note_change();
     }
 
     fn preview_panel(&mut self, ui: &mut Ui) {
@@ -603,14 +730,29 @@ impl EncodeApp {
             ui.vertical(|ui| {
                 ui.label(RichText::new(job.source.display_name()).strong());
                 ui.label(job.source.path_hint().display().to_string());
-                if let Some(info) = self.handle.lock(|s| s.probe_job(&job)) {
-                    ui.label(info.summary());
+                if let (Some(w), Some(h)) = (job.preset.video.width, job.preset.video.height) {
+                    if let Some(d) = job.duration_sec {
+                        ui.label(format!("{w}×{h} · {}", encodecraft_ffmpeg::format_duration(d)));
+                    } else if job.metadata_pending {
+                        ui.label(format!("{w}×{h} · probing…"));
+                    } else {
+                        ui.label(format!("{w}×{h}"));
+                    }
+                } else if job.metadata_pending {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Reading source…");
+                    });
                 }
                 ui.label(format!("-> {}", job.output.display()));
             });
             ui.add_space(16.0);
             if let Some(tex) = self.ensure_thumb(ui.ctx(), &job) {
                 ui.image((tex.id(), Vec2::new(240.0, 135.0)));
+            } else if self.thumb_inflight.contains(&job.id) {
+                ui.allocate_ui(Vec2::new(240.0, 135.0), |ui| {
+                    ui.centered_and_justified(|ui| ui.spinner());
+                });
             } else {
                 ui.allocate_ui(Vec2::new(240.0, 135.0), |ui| {
                     ui.centered_and_justified(|ui| ui.label(RichText::new("No thumbnail").color(t.text_faint)));
@@ -643,8 +785,14 @@ impl EncodeApp {
         } else {
             text.lines().filter(|l| l.to_ascii_lowercase().contains(&self.log_filter.to_ascii_lowercase())).collect::<Vec<_>>().join("\n")
         };
-        egui::ScrollArea::vertical().id_salt("log").stick_to_bottom(true).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut dummy(&shown)).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        let lines: Vec<&str> = shown.lines().collect();
+        let n = lines.len().max(1);
+        egui::ScrollArea::vertical().id_salt("log").stick_to_bottom(true).show_rows(ui, 16.0, n, |ui, range| {
+            for i in range {
+                if let Some(line) = lines.get(i) {
+                    ui.monospace(*line);
+                }
+            }
         });
     }
 
@@ -721,23 +869,19 @@ impl EncodeApp {
             self.handle.lock(|sess| {
                 sess.settings = s.clone();
             });
-            self.handle.persist();
+            self.handle.mark_dirty();
             self.status = "Settings saved".into();
         }
     }
 
     fn ffmpeg_banner(&self, ctx: &egui::Context) {
-        let (ok, msg) = self.handle.lock(|s| match &s.ffmpeg {
-            Ok(f) => (true, f.ok_message()),
-            Err(e) => (false, e.to_string()),
-        });
-        if ok {
+        if self.ffmpeg_ok {
             return;
         }
         let t = self.t();
         egui::TopBottomPanel::bottom("ff-missing").frame(egui::Frame::NONE.fill(Color32::from_rgb(80, 24, 20)).inner_margin(8.0)).show(ctx, |ui| {
             ui.label(RichText::new("FFmpeg not found").strong().color(Color32::WHITE));
-            ui.label(RichText::new(msg).color(t.tab_text_active).size(12.0));
+            ui.label(RichText::new(&self.ffmpeg_msg).color(t.tab_text_active).size(12.0));
         });
     }
 
@@ -813,6 +957,8 @@ impl EncodeApp {
             if picker.comps.is_empty() || !comps.is_empty() {
                 match self.handle.lock(|s| s.add_effectcraft_comps(picker.path.clone(), &comps, &preset)) {
                     Ok(ids) => {
+                        self.handle.note_change();
+                        self.handle.schedule_probe(ids.clone());
                         self.status = format!("Queued {} EffectCraft comp(s)", ids.len());
                         queued_ok = true;
                     }
@@ -888,18 +1034,14 @@ impl EncodeApp {
         }
     }
 
-    fn ensure_thumb(&mut self, ctx: &egui::Context, job: &Job) -> Option<&egui::TextureHandle> {
+    fn ensure_thumb(&mut self, _ctx: &egui::Context, job: &Job) -> Option<&egui::TextureHandle> {
         if self.thumb_tex.contains_key(&job.id) {
             return self.thumb_tex.get(&job.id);
         }
-        let path = self.handle.lock(|s| s.thumbnail(job))?;
-        let bytes = std::fs::read(&path).ok()?;
-        let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
-        let size = [img.width() as usize, img.height() as usize];
-        let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-        let tex = ctx.load_texture(format!("th-{}", job.id), color, egui::TextureOptions::LINEAR);
-        self.thumb_tex.insert(job.id.clone(), tex);
-        self.thumb_tex.get(&job.id)
+        if self.thumb_inflight.insert(job.id.clone()) {
+            self.handle.submit_io(IoCmd::Thumb(job.id.clone()));
+        }
+        None
     }
 }
 
@@ -977,6 +1119,48 @@ pub fn run(handle: Handle) -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn virtualized_list_draws_only_visible_rows() {
+        let ctx = egui::Context::default();
+        let mut drawn = 0usize;
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 360.0))), ..Default::default() };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical().show_rows(ui, 36.0, 1000, |ui, range| {
+                    drawn = range.len();
+                    for i in range {
+                        ui.label(format!("row {i}"));
+                    }
+                });
+            });
+        });
+        assert!(drawn > 0, "should draw the visible window");
+        assert!(drawn < 40, "viewport must not build all 1,000 rows (drew {drawn})");
+    }
+
+    #[test]
+    fn seed_1000_outputs_for_ui_snapshot() {
+        let dir = std::env::temp_dir().join(format!("ec-bench-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        encodecraft_engine::set_home(dir);
+        let session = encodecraft_engine::Handle::open_core().expect("core").lock(|s| {
+            encodecraft_engine::seed_stress_queue(s, 1000).expect("seed");
+            s.queue.jobs.len()
+        });
+        assert_eq!(session, 1000);
+        let t0 = std::time::Instant::now();
+        let n = encodecraft_engine::Handle::open_core().expect("core2");
+        // reuse already-seeded? new session empty — time for_ui clone of 1000
+        n.lock(|s| {
+            encodecraft_engine::seed_stress_queue(s, 1000).expect("seed2");
+            let _views: Vec<_> = s.queue.jobs.iter().map(encodecraft_queue::Job::for_ui).collect();
+        });
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("1000-row for_ui snapshot: {ms:.2} ms");
+        assert!(ms < 200.0, "snapshot of 1,000 rows took {ms:.1} ms");
+        let _ = session;
+    }
+
     #[test]
     fn window_uses_frame_e_cobalt_icon() {
         let icon = super::window_icon();

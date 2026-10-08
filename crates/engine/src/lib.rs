@@ -10,23 +10,25 @@ mod fsutil;
 mod ipc;
 mod paths;
 mod persist;
+mod tasks;
 mod token;
 mod watch;
 mod worker;
 
+pub use tasks::{IoCmd, UiEvent};
 pub use drops::{
     classify_dropped_paths, ecproj_comp_size, ecproj_comp_size_file, list_ecproj_compositions, list_ecproj_compositions_file, DropOutcome, SequenceDrop,
 };
 pub use ipc::{default_port, post_enqueue, try_connect, IpcServer};
 pub use paths::{data_dir, inbox_dir, set_home};
-pub use demo::seed_preset_ui_demo;
+pub use demo::{seed_preset_ui_demo, seed_stress_queue};
 pub use persist::Settings;
 pub use watch::WatchFolder;
 
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -58,6 +60,9 @@ pub struct Handle {
     stops: Arc<Mutex<HashMap<String, EncodeStop>>>,
     alive: Arc<AtomicBool>,
     ipc_port: Arc<Mutex<Option<u16>>>,
+    dirty: Arc<AtomicBool>,
+    rev: Arc<AtomicU64>,
+    io: Arc<Mutex<Option<tasks::IoHub>>>,
 }
 
 impl Clone for Handle {
@@ -67,6 +72,9 @@ impl Clone for Handle {
             stops: Arc::clone(&self.stops),
             alive: Arc::clone(&self.alive),
             ipc_port: Arc::clone(&self.ipc_port),
+            dirty: Arc::clone(&self.dirty),
+            rev: Arc::clone(&self.rev),
+            io: Arc::clone(&self.io),
         }
     }
 }
@@ -87,6 +95,9 @@ impl Handle {
             stops: Arc::new(Mutex::new(HashMap::new())),
             alive: Arc::new(AtomicBool::new(true)),
             ipc_port: Arc::new(Mutex::new(None)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            rev: Arc::new(AtomicU64::new(1)),
+            io: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -104,6 +115,51 @@ impl Handle {
         self.lock(|s| {
             let _ = s.save();
         });
+        self.dirty.store(false, Ordering::Relaxed);
+    }
+
+    /// Queue a disk write on the I/O thread. Safe to call from the UI.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+        self.rev.fetch_add(1, Ordering::Relaxed);
+        self.submit_io(tasks::IoCmd::Persist);
+    }
+
+    pub fn note_change(&self) {
+        self.rev.fetch_add(1, Ordering::Relaxed);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.rev.load(Ordering::Relaxed)
+    }
+
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn submit_io(&self, cmd: tasks::IoCmd) {
+        if let Ok(g) = self.io.lock() {
+            if let Some(hub) = g.as_ref() {
+                let _ = hub.tx.send(cmd);
+            }
+        }
+    }
+
+    pub fn poll_ui_events(&self) -> Vec<tasks::UiEvent> {
+        if let Ok(g) = self.io.lock() {
+            if let Some(hub) = g.as_ref() {
+                return hub.poll();
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn schedule_probe(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.submit_io(tasks::IoCmd::Probe(ids));
     }
 
     pub fn enqueue(&self, req: EnqueueRequest) -> Result<Vec<String>, EngineError> {
@@ -116,7 +172,7 @@ impl Handle {
     }
 
     fn enqueue_with(&self, mut req: EnqueueRequest, clamp_output: bool) -> Result<Vec<String>, EngineError> {
-        self.lock(|s| {
+        let ids = self.lock(|s| {
             let configured = s.resolve_output_dir(&req.source, None);
             let dest = if clamp_output {
                 constrain_output_dir(req.output_dir.as_deref(), &configured).map_err(EngineError::Message)?
@@ -127,9 +183,11 @@ impl Handle {
             req.output_dir = Some(dest.clone());
             let ids = s.queue.enqueue(&req, &s.presets, &dest, &s.settings.naming, s.settings.allow_overwrite, clamp_output)?;
             s.resolve_pending_output_names(&ids);
-            let _ = s.save();
-            Ok(ids)
-        })
+            Ok::<_, EngineError>(ids)
+        })?;
+        self.note_change();
+        self.schedule_probe(ids.clone());
+        Ok(ids)
     }
 
     pub fn execute_json(&self, req: ControlRequest) -> ControlReply {
@@ -244,6 +302,10 @@ impl Handle {
     }
 
     fn spawn_workers(&self) {
+        let hub = tasks::start(self.clone());
+        if let Ok(mut g) = self.io.lock() {
+            *g = Some(hub);
+        }
         let h = self.clone();
         thread::Builder::new().name("encodecraft-worker".into()).spawn(move || worker::run(h)).ok();
         let h = self.clone();
@@ -415,7 +477,6 @@ impl Session {
     /// Fill `{width}`/`{height}` from a file probe or the EffectCraft `.ecproj` when Match Source left them as `src`.
     pub fn resolve_pending_output_names(&mut self, ids: &[String]) {
         let allow = self.settings.allow_overwrite;
-        let ff = self.ffmpeg.as_ref().ok().cloned();
         let presets = self.presets.clone();
         for id in ids {
             let Some(job) = self.queue.jobs.iter_mut().find(|j| j.id == *id) else {
@@ -424,11 +485,9 @@ impl Session {
             if !job.size_name_pending {
                 continue;
             }
+            // File probes (ffprobe) run on the I/O thread. EffectCraft size is a small JSON read.
             let size = job.source.pixel_size().or_else(|| match &job.source {
-                JobSource::File { path, .. } => {
-                    let p = path.clone();
-                    ff.as_ref().and_then(|f| probe(f, &p).ok()).map(|m| (m.width(), m.height())).filter(|(w, h)| *w > 0 && *h > 0)
-                }
+                JobSource::File { .. } => None,
                 JobSource::EffectCraft { project, comp, .. } => ecproj_comp_size_file(project, comp.as_deref()),
             });
             if let Some((w, h)) = size {

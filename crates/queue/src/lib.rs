@@ -1047,6 +1047,44 @@ mod tests {
         assert_eq!(q.job_ids(), order);
     }
 
+    #[test]
+    fn delete_selection_then_undo_restores_original_order() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        for name in ["a", "b", "c"] {
+            let mut req = req_many();
+            req.sizes = vec![];
+            req.source = JobSource::file(format!("/ads/{name}.mp4"));
+            q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        }
+        let order = q.job_ids();
+        let remove = vec![order[0].clone(), order[2].clone()];
+        let taken = q.take_jobs(&remove);
+        assert_eq!(taken.len(), 2);
+        assert_eq!(q.jobs.len(), 1);
+        assert_eq!(q.jobs[0].id, order[1]);
+        q.insert_jobs(taken, Some(&order));
+        assert_eq!(q.job_ids(), order);
+    }
+
+    #[test]
+    fn clear_finished_keeps_ready_and_encoding() {
+        let lib = PresetLibrary::new();
+        let mut q = EncodeQueue::new();
+        for name in ["a", "b", "c"] {
+            let mut req = req_many();
+            req.sizes = vec![];
+            req.source = JobSource::file(format!("/ads/{name}.mp4"));
+            q.enqueue(&req, &lib, std::path::Path::new("/out"), "{name}", false, true).unwrap();
+        }
+        q.jobs[0].status = JobStatus::Done;
+        q.jobs[1].status = JobStatus::Encoding;
+        q.jobs[2].status = JobStatus::Waiting;
+        q.remove_finished();
+        assert_eq!(q.jobs.len(), 2);
+        assert!(q.jobs.iter().all(|j| matches!(j.status, JobStatus::Encoding | JobStatus::Waiting)));
+    }
+
     fn honor_req() -> EnqueueRequest {
         EnqueueRequest {
             schema: 1,

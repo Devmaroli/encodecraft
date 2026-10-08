@@ -161,8 +161,8 @@ impl EncodeApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let t = self.t();
-            ui.label(RichText::new(format!("{n} selected")).color(t.accent).size(12.0));
-            if ui.small_button("✕").on_hover_text("Clear selection").clicked() {
+            let chip = ui.add(egui::Label::new(RichText::new(format!("{n} selected ✕")).color(t.accent).size(12.0)).sense(Sense::click()));
+            if chip.on_hover_text("Clear selection").clicked() {
                 self.selected_ids.clear();
             }
         });
@@ -181,7 +181,16 @@ impl EncodeApp {
         }
         if let Some(m) = self.marquee.clone() {
             let rect = Rect::from_two_pos(m.start, m.current);
-            let items: Vec<(String, Rect)> = geoms.iter().filter_map(|g| g.job_id.clone().map(|id| (id, g.rect))).collect();
+            let items: Vec<(String, Rect)> = geoms
+                .iter()
+                .flat_map(|g| {
+                    if let Some(id) = &g.job_id {
+                        vec![(id.clone(), g.rect)]
+                    } else {
+                        g.job_ids.iter().map(|id| (id.clone(), g.rect)).collect()
+                    }
+                })
+                .collect();
             let hits = crate::select::ids_touching_marquee(&items, rect);
             let mode = if m.toggle {
                 crate::select::MarqueeMode::Toggle
@@ -334,11 +343,32 @@ impl EncodeApp {
                 }
             }
         }
+        let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
         if resp.clicked() && !resp.dragged() {
-            if self.collapsed.contains(&g.key) {
-                self.collapsed.remove(&g.key);
+            let chevron = rect.left() + 8.0 + 28.0;
+            let on_chevron = resp.interact_pointer_pos().is_some_and(|p| p.x < chevron);
+            if on_chevron {
+                if self.collapsed.contains(&g.key) {
+                    self.collapsed.remove(&g.key);
+                } else {
+                    self.collapsed.insert(g.key.clone());
+                }
+            } else if mods.0 {
+                for id in &g.job_ids {
+                    crate::select::toggle_id(&mut self.selected_ids, id);
+                }
+            } else if mods.1 {
+                if let (Some(first), Some(last)) = (g.job_ids.first(), g.job_ids.last()) {
+                    let anchor = self.shift_anchor.clone().unwrap_or_else(|| first.clone());
+                    let order: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
+                    self.selected_ids = crate::select::range_select(&order, &anchor, last);
+                }
             } else {
-                self.collapsed.insert(g.key.clone());
+                self.selected_ids = g.job_ids.clone();
+                if let Some(id) = g.job_ids.first() {
+                    self.shift_anchor = Some(id.clone());
+                    self.handle.lock(|s| s.selected = Some(id.clone()));
+                }
             }
         }
         let collapsed = self.collapsed.contains(&g.key);

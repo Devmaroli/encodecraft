@@ -897,6 +897,30 @@ mod tests {
     }
 
     #[test]
+    fn bulk_preset_keeps_sticky_and_one_off_rules() {
+        use encodecraft_presets::{APPROVAL_RES_ID, BETTER_RES_ID, INSTALLATION_ID};
+        let _guard = paths::lock_home();
+        let home = temp_home();
+        paths::set_home(home.clone());
+        let h = Handle::open_core().unwrap();
+        let project = home.join("spot.ecproj");
+        std::fs::write(&project, br#"{"compositions":[{"name":"Main","width":1080,"height":1080}]}"#).unwrap();
+        let ids = h.lock(|s| s.add_effectcraft_comps(project.clone(), &["Main".into()], "system.h264-mp4")).unwrap();
+        h.lock(|s| s.apply_preset_to_jobs(&ids, BETTER_RES_ID)).unwrap();
+        let ids2 = h.lock(|s| s.add_effectcraft_comps(project.clone(), &["Main".into()], "system.h264-mp4")).unwrap();
+        h.lock(|s| {
+            let j = s.queue.jobs.iter().find(|j| j.id == ids2[0]).unwrap();
+            assert_eq!(j.preset.id, BETTER_RES_ID);
+        });
+        h.lock(|s| s.apply_preset_to_jobs(&ids, APPROVAL_RES_ID)).unwrap();
+        let ids3 = h.lock(|s| s.add_effectcraft_comps(project, &["Main".into()], "system.h264-mp4")).unwrap();
+        h.lock(|s| {
+            let j = s.queue.jobs.iter().find(|j| j.id == ids3[0]).unwrap();
+            assert_eq!(j.preset.id, INSTALLATION_ID);
+        });
+    }
+
+    #[test]
     fn production_commands_go_through_hidden_helper() {
         let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let roots = ["crates/ffmpeg/src", "crates/engine/src", "crates/ui-egui/src", "apps/encodecraft-cli/src"];

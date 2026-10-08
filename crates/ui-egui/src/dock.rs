@@ -296,10 +296,10 @@ pub fn layout_full() -> DockState<PanelKind> {
     let _ = dock.main_surface_mut().split_right(NodeIndex::root(), 0.72, vec![PanelKind::PresetBrowser]);
     let [_top, bottom] = dock.main_surface_mut().split_below(
         NodeIndex::root(),
-        0.56,
+        0.52,
         vec![PanelKind::Encoding, PanelKind::Source, PanelKind::Log, PanelKind::WatchFolders, PanelKind::Settings],
     );
-    let _ = dock.main_surface_mut().split_right(bottom, 0.58, vec![PanelKind::EncodePreview]);
+    let _ = dock.main_surface_mut().split_right(bottom, 0.50, vec![PanelKind::EncodePreview]);
     dock.translations.tab_context_menu.eject_button = "Pop out".into();
     dock.translations.tab_context_menu.close_button = "Close panel".into();
     dock

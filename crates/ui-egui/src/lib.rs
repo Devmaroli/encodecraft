@@ -156,6 +156,7 @@ impl EncodeApp {
             match ev {
                 UiEvent::Changed => {
                     self.snap_rev = 0;
+                    ctx.request_repaint();
                 }
                 UiEvent::Thumb { id, rgba, w, h } => {
                     self.thumb_inflight.remove(&id);
@@ -168,6 +169,7 @@ impl EncodeApp {
                     let tex = ctx.load_texture(format!("prev-{id}"), color, egui::TextureOptions::LINEAR);
                     self.preview_tex.insert(id.clone(), tex);
                     self.last_preview = Some(encode_preview::LastPreview { id, name, output_w, output_h });
+                    ctx.request_repaint();
                 }
                 UiEvent::Ecproj { path, comps, note } => {
                     let selected = if comps.is_empty() { Vec::new() } else { vec![true; comps.len()] };
@@ -219,6 +221,9 @@ impl EncodeApp {
             if !left.is_zero() {
                 ctx.request_repaint_after(left.min(Duration::from_millis(250)));
             }
+        } else {
+            // Pick up HTTP / CLI enqueue and preview frames while the cursor is idle.
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
         if self.bench.is_some() {
             ctx.request_repaint();

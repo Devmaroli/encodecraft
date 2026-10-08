@@ -80,22 +80,29 @@ impl EncodeApp {
 
     fn show_preview_tiles(&mut self, ui: &mut Ui, t: &Tokens, jobs: &[Job]) {
         ui.label(RichText::new(format!("{} rendering — click a tile to enlarge", jobs.len())).small().color(t.text_dim));
-        let tile = Vec2::new(220.0, 124.0);
-        let ids: Vec<String> = jobs.iter().map(|j| j.id.clone()).collect();
+        let avail = ui.available_size();
+        let cols = if avail.x >= 360.0 { 2.0 } else { 1.0 };
+        let gap = 8.0;
+        let tile_w = ((avail.x - gap * (cols - 1.0)) / cols).clamp(148.0, 420.0);
+        let img_h = (tile_w * 0.48).clamp(72.0, 160.0);
+        let tile = Vec2::new(tile_w, img_h);
+        let cell_h = img_h + 78.0;
         egui::ScrollArea::vertical().id_salt("enc-preview-tiles").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(gap, 8.0);
                 for job in jobs {
-                    ui.allocate_ui(Vec2::new(tile.x + 8.0, tile.y + 92.0), |ui| {
-                        let clicked = self.paint_letterboxed(ui, t, &job.id, output_wh(job).0, output_wh(job).1, tile, true);
-                        if clicked {
-                            self.preview_focus = Some(job.id.clone());
-                        }
-                        self.preview_stats(ui, t, job, false);
+                    ui.allocate_ui(Vec2::new(tile_w, cell_h), |ui| {
+                        ui.vertical(|ui| {
+                            let clicked = self.paint_letterboxed(ui, t, &job.id, output_wh(job).0, output_wh(job).1, tile, true);
+                            if clicked {
+                                self.preview_focus = Some(job.id.clone());
+                            }
+                            self.preview_stats(ui, t, job, false);
+                        });
                     });
                 }
             });
         });
-        let _ = ids;
     }
 
     fn show_preview_job(&mut self, ui: &mut Ui, t: &Tokens, job: &Job, large: bool) {
@@ -155,27 +162,25 @@ impl EncodeApp {
 
         let pct = job.progress.percent.clamp(0.0, 100.0);
         let bar_w = ui.available_width().max(40.0);
-        let (bar, _) = ui.allocate_exact_size(Vec2::new(bar_w, 7.0), Sense::hover());
+        let (bar, _) = ui.allocate_exact_size(Vec2::new(bar_w, 6.0), Sense::hover());
         ui.painter().rect_filled(bar, CornerRadius::same(3), t.raised);
         let fill_w = (bar.width() * (pct / 100.0)).clamp(0.0, bar.width());
         if fill_w > 0.5 {
             let fill = Rect::from_min_size(bar.min, Vec2::new(fill_w, bar.height()));
             ui.painter().rect_filled(fill, CornerRadius::same(3), t.accent);
         }
-        ui.label(RichText::new(format!("{pct:.1}%")).small().color(t.text_dim));
 
         let frame = frame_at_25(job.progress.out_time_sec, job.progress.frame);
         let tc = timecode_25(frame);
-        ui.label(RichText::new(format!("Frame {frame}  ·  {tc}  (25 fps)")).color(t.text).size(if detailed { 13.0 } else { 12.0 }));
-
         let elapsed = job.started_ms.map(|s| (unix_ms().saturating_sub(s) as f64) / 1000.0).unwrap_or(0.0);
         let remain = job.progress.eta_sec.filter(|s| s.is_finite() && *s >= 0.0).map(format_duration).unwrap_or_else(|| "—".into());
-        ui.label(RichText::new(format!("Elapsed {}  ·  Remaining {remain}", format_duration(elapsed))).color(t.text_dim).size(12.0));
-
         let speed = if job.progress.speed > 0.05 { format!("{:.2}×", job.progress.speed) } else { "—".into() };
         let fps = if job.progress.fps > 0.05 { format!("{:.1} fps", job.progress.fps) } else { "—".into() };
         let br = format_bitrate(job.progress.bitrate_kbps);
-        ui.label(RichText::new(format!("{speed}  ·  {fps}  ·  {br}")).color(t.text).size(12.0));
+        let size = if detailed { 13.0 } else { 11.0 };
+        ui.label(RichText::new(format!("{pct:.1}%  ·  Frame {frame}  ·  {tc}")).color(t.text).size(size));
+        ui.label(RichText::new(format!("Elapsed {}  ·  Remaining {remain}", format_duration(elapsed))).color(t.text_dim).size(11.0));
+        ui.label(RichText::new(format!("{speed}  ·  {fps}  ·  {br}")).color(t.text).size(11.0));
     }
 }
 

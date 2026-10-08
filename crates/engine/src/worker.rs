@@ -46,6 +46,7 @@ fn dispatch(h: &Handle) {
         }
     });
     h.note_change();
+    h.emit_ui(crate::UiEvent::Changed);
     let handle = h.clone();
     let job_id = id.clone();
     let _ = thread::Builder::new().name(format!("encode-{id}")).spawn(move || {
@@ -151,6 +152,7 @@ fn encode_job(h: &Handle, id: &str) -> Result<(), crate::EngineError> {
                 }
             });
             h_prog.note_change();
+            h_prog.emit_ui(crate::UiEvent::Changed);
         },
         |line| {
             let line = line.to_string();

@@ -32,6 +32,10 @@ pub const APP_ID: &str = "encodecraft";
 /// Environment variable that overrides the data directory (used in tests).
 pub const HOME_ENV: &str = "ENCODECRAFT_HOME";
 
+/// Marker file next to `encodecraft.exe`. When present, queue/presets/settings
+/// live in a `data` folder beside the executable instead of `%APPDATA%`.
+pub const PORTABLE_MARKER: &str = "portable.txt";
+
 /// Environment variable that overrides the FFmpeg binary path.
 pub const FFMPEG_ENV: &str = "FFMPEG_PATH";
 
@@ -454,13 +458,19 @@ pub fn ipc_token_dirs() -> Vec<PathBuf> {
             v.push(p);
         }
     }
+    if let Some(p) = portable_data_dir() {
+        if !v.contains(&p) {
+            v.push(p);
+        }
+    }
     v.extend(platform_token_dirs());
     v
 }
 
 /// Canonical user-data directory (queue, presets, `ipc-token`, inbox).
 ///
-/// Matches `directories::ProjectDirs::from("dev", "EncodeCraft", "EncodeCraft").data_dir()`:
+/// Order: `ENCODECRAFT_HOME`, then a [`PORTABLE_MARKER`] next to the executable
+/// (`<exe dir>/data`), then the platform folder:
 /// Windows `%APPDATA%\EncodeCraft\EncodeCraft\data`, macOS
 /// `~/Library/Application Support/dev.EncodeCraft.EncodeCraft`, Linux
 /// `$XDG_DATA_HOME/encodecraft` or `~/.local/share/encodecraft`.
@@ -471,7 +481,26 @@ pub fn canonical_data_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    if let Some(p) = portable_data_dir() {
+        return Some(p);
+    }
     platform_data_dir()
+}
+
+/// `Some` when `portable.txt` sits next to the running executable.
+pub fn portable_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    portable_data_dir_in(exe.parent()?)
+}
+
+/// Data folder used when [`PORTABLE_MARKER`] is in `exe_dir`.
+pub fn portable_data_dir_in(exe_dir: impl AsRef<std::path::Path>) -> Option<PathBuf> {
+    let dir = exe_dir.as_ref();
+    if dir.join(PORTABLE_MARKER).is_file() {
+        Some(dir.join("data"))
+    } else {
+        None
+    }
 }
 
 /// Inbox folder inside [`canonical_data_dir`].
@@ -681,6 +710,16 @@ mod tests {
     fn scale_mode_aliases() {
         assert_eq!(ScaleMode::parse_name("contain"), Some(ScaleMode::Fit));
         assert_eq!(ScaleMode::parse_name("cover"), Some(ScaleMode::Fill));
+    }
+
+    #[test]
+    fn portable_marker_uses_data_folder_next_to_exe() {
+        let root = std::env::temp_dir().join(format!("ec-portable-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        assert!(portable_data_dir_in(&root).is_none());
+        std::fs::write(root.join(PORTABLE_MARKER), "portable\n").unwrap();
+        assert_eq!(portable_data_dir_in(&root), Some(root.join("data")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

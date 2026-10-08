@@ -1,0 +1,7 @@
+EncodeCraft portable mode
+
+Keep this file next to encodecraft.exe. Queue, presets, and settings are stored
+in the data folder beside the executable (not in %APPDATA%). Copy this whole
+folder to a USB stick or shared drive and it takes its settings with it.
+
+Do not run encodecraft.exe from inside the zip — unzip the folder first.

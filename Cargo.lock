@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "encodecraft-engine",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "encodecraft-engine",
  "encodecraft-ffmpeg",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "encodecraft-ffmpeg",
  "encodecraft-job",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-ffmpeg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "encodecraft-job",
  "encodecraft-presets",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-job"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-presets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "encodecraft-job",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-queue"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "encodecraft-ffmpeg",
  "encodecraft-job",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "encodecraft-ui-egui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3958,7 +3958,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "yoke"

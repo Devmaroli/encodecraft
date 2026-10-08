@@ -12,9 +12,13 @@ fn main() {
         return;
     }
     let path = ico.to_str().expect("app icon path must be UTF-8");
+    let ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
     let mut res = winresource::WindowsResource::new();
     res.set_icon(path);
     res.set("ProductName", "EncodeCraft");
     res.set("FileDescription", "EncodeCraft");
+    res.set("ProductVersion", &ver);
+    res.set("FileVersion", &ver);
+    res.set("LegalCopyright", "EncodeCraft contributors");
     res.compile().unwrap_or_else(|e| panic!("could not embed Windows app icon {path}: {e}"));
 }

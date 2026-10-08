@@ -1,6 +1,6 @@
 # EncodeCraft
 
-A desktop **encode queue** in the spirit of Adobe Media Encoder, written in Rust as a companion to [EffectCraft](https://github.com/storytold/effectcraft) (the open-source After Effects clone). Same family of choices: Cargo workspace, engine crates under the UI, native **egui / eframe**, MIT OR Apache-2.0, no Adobe assets.
+A desktop **encode queue** in the spirit of Adobe Media Encoder, written in Rust as a companion to [EffectCraft](https://github.com/storytold/effectcraft) (the open-source After Effects clone). Same family of choices: Cargo workspace, engine crates under the UI, native **egui / eframe**, MIT OR Apache-2.0, no Adobe assets. Current release: **v0.2.0**.
 
 EncodeCraft is an independent project. It is not affiliated with Adobe or with the ArtCraft / Crafting Apps team.
 
@@ -17,7 +17,7 @@ apps/encodecraft-cli    encode / enqueue / serve
 
 EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to the FFmpeg binary on purpose: a delivery queue needs every codec FFmpeg already has, including hardware you trust. FFmpeg is never linked (GPL-safe). If it is missing, the UI shows install instructions instead of crashing.
 
-## Features (v0.1)
+## Features (v0.2)
 
 - Encode **queue**: add (picker + drag-and-drop), drag rows to change render order (ghost + insertion line, multi-select, source groups stay together, encoding/done rows locked), Up/Down or Alt+↑↓, Undo (Ctrl+Z), start / pause / stop, **Render N at once**
 - **Presets**: H.264 MP4, studio **Better Res** (7/8 Mbps), **Installation** (5/6 Mbps), **Approval Res** (1/1.2 Mbps with AAC), **Sultan** (2/3 Mbps, no audio); one-off presets are not remembered as a manual choice. Also H.265/HEVC MP4, ProRes MOV, WebM VP9, animated GIF, PNG/JPEG sequences, AAC / WAV / MP3 — create, edit, import, export
@@ -39,9 +39,16 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 
 ### Windows (no Rust)
 
-A ready-to-run 64-bit zip (`encodecraft-*-windows-x64.zip`) ships `encodecraft.exe`, `encodecraft-cli.exe`, and a bundled `ffmpeg.exe` / `ffprobe.exe`. Unzip the folder and double-click `encodecraft.exe`. See `README-Windows.txt` inside the zip (SmartScreen: More info → Run anyway).
+Office-style installs, no administrator rights:
 
-To rebuild that zip from Linux: `./scripts/build-windows.sh` or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
+- **`EncodeCraft-Setup-x64.exe`** — per-user installer to `%LOCALAPPDATA%\Programs\Craft\EncodeCraft`, Start menu + desktop shortcuts, Frame E Cobalt icon, uninstaller, bundled FFmpeg/ffprobe. Settings stay in `%APPDATA%\EncodeCraft\EncodeCraft\data`.
+- **`EncodeCraft-Portable-x64.zip`** — unzip anywhere and run `encodecraft.exe`. A `portable.txt` marker next to the exe stores queue/presets/settings in a `data` folder beside it (not `%APPDATA%`).
+
+Both include `ffmpeg.exe` / `ffprobe.exe`. SmartScreen: More info → Run anyway (the download is not code-signed).
+
+To rebuild from Linux: `./scripts/package-windows.sh` (needs `nsis` / `makensis`) or `cargo xtask windows`. Optional Wine check: `./scripts/smoke-windows-wine.sh`.
+
+A version tag (`v0.2.0`) on the GitHub mirror runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and attaches both files plus `SHA256SUMS`.
 
 The Windows `.exe` and window icon is **Frame E in Electric Cobalt** (`assets/app-icon/encodecraft.ico` and `encodecraft-256.png`). Source pack: [`assets/app-icon/frame-e-electric-cobalt/`](assets/app-icon/frame-e-electric-cobalt/).
 
@@ -108,7 +115,7 @@ Tests:
 cargo test --workspace
 ```
 
-Data dir (queue / presets / inbox / `ipc-token`): `%APPDATA%\EncodeCraft\EncodeCraft\data` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. Override with `ENCODECRAFT_HOME`.
+Data dir (queue / presets / inbox / `ipc-token`): `%APPDATA%\EncodeCraft\EncodeCraft\data` on Windows, `~/Library/Application Support/dev.EncodeCraft.EncodeCraft` on macOS, `~/.local/share/encodecraft` on Linux. A `portable.txt` next to the executable switches that to `<exe folder>/data`. Override with `ENCODECRAFT_HOME`.
 
 ## EffectCraft
 

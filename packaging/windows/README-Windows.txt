@@ -8,9 +8,20 @@ You do not need to install Rust.
 
 Double-click  encodecraft.exe  to open the app.
 
-This zip already includes ffmpeg.exe and ffprobe.exe in the same folder. Leave them
-there — EncodeCraft looks next to itself first, so encoding works without a separate
+This folder already includes ffmpeg.exe and ffprobe.exe. Leave them here —
+EncodeCraft looks next to itself first, so encoding works without a separate
 FFmpeg install.
+
+
+Portable vs installed
+---------------------
+If you see portable.txt next to encodecraft.exe, this is a portable copy.
+Queue, presets and settings go in a data folder beside the exe (not %APPDATA%).
+Copy the whole folder to take your settings with you.
+
+The EncodeCraft-Setup-x64.exe installer (no admin rights) puts the app in
+%LOCALAPPDATA%\Programs\Craft\EncodeCraft, adds Start menu and desktop shortcuts,
+and keeps settings in %APPDATA%\EncodeCraft\EncodeCraft\data.
 
 
 First launch — “Windows protected your PC”
@@ -54,8 +65,7 @@ people who want to encode without opening the window. You can ignore it.
 If encoding fails
 -----------------
 Keep ffmpeg.exe and ffprobe.exe in this same folder as encodecraft.exe.
-Do not run the .exe files from inside the zip — unzip the whole folder first,
-for example to Desktop\EncodeCraft.
+Do not run the .exe files from inside the zip — unzip the whole folder first.
 
 
 Licenses

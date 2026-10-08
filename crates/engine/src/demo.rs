@@ -88,8 +88,12 @@ pub fn seed_preset_ui_demo(session: &mut Session) -> Result<(), EngineError> {
             j.preset_reason = Some(PresetReason::Manual);
         }
     }
-    for j in &mut session.queue.jobs {
-        j.status = JobStatus::Waiting;
+    for (i, j) in session.queue.jobs.iter_mut().enumerate() {
+        j.status = match i {
+            0 => JobStatus::Done,
+            1 => JobStatus::Encoding,
+            _ => JobStatus::Waiting,
+        };
     }
 
     let file_req = EnqueueRequest {

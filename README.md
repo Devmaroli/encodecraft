@@ -19,7 +19,7 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 
 ## Features (v0.1)
 
-- Encode **queue**: add (picker + drag-and-drop), reorder, remove, duplicate, start / pause / stop, parallel jobs with a configurable limit
+- Encode **queue**: add (picker + drag-and-drop), drag rows to change render order (ghost + insertion line, multi-select, source groups stay together, encoding/done rows locked), Up/Down or Alt+↑↓, Undo (Ctrl+Z), start / pause / stop, **Render N at once**
 - **Presets**: H.264 MP4, studio **Better Res** (7/8 Mbps), **Installation** (5/6 Mbps), **Approval Res** (1/1.2 Mbps with AAC), **Sultan** (2/3 Mbps, no audio); one-off presets are not remembered as a manual choice. Also H.265/HEVC MP4, ProRes MOV, WebM VP9, animated GIF, PNG/JPEG sequences, AAC / WAV / MP3 — create, edit, import, export
 - Per-job **container, codec, size, fps, CRF / bitrate / 2-pass VBR, audio, trim**, plus per-item preset override
 - **Preset selection** like Media Encoder: blue Format/Preset dropdowns per output, Auto/Manual/Default tags, pinned Studio group, drag from the Preset Browser onto multi-selected rows (Undo), and a form-based Auto-assign rules editor

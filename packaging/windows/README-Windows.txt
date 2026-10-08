@@ -39,6 +39,8 @@ How to use it
     automatically (ultra-wide and listed screens vs everything else). The queue
     shows which preset and why; you can override per item. Approval Res and
     Sultan are one-off: the next send of that comp goes back to Auto.
+  • Drag rows (or use Up / Down, Alt+↑↓) to change render order. Encoding and
+    finished rows stay locked at the top. Ctrl+Z undoes a move.
   • Click  Start queue.
 
 Files are written to an Output folder next to the EffectCraft project (or next to a

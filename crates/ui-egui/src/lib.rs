@@ -114,7 +114,11 @@ impl eframe::App for EncodeApp {
             std::process::exit(0);
         }
         theme::apply(ctx, &self.tokens);
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if egui::DragAndDrop::payload::<ux::QueueDrag>(ctx).is_some() {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
             self.undo_toast();
@@ -370,10 +374,10 @@ impl EncodeApp {
                             let _ = self.handle.lock(|s| s.queue.remove(&id));
                         }
                     }
-                    if ui.button("↑").on_hover_text("Move selected rows up (Alt+↑)").clicked() {
+                    if ui.button("  Up  ").on_hover_text("Move selected rows up (Alt+↑)").clicked() {
                         self.move_selected_rows(-1);
                     }
-                    if ui.button("↓").on_hover_text("Move selected rows down (Alt+↓)").clicked() {
+                    if ui.button("  Down  ").on_hover_text("Move selected rows down (Alt+↓)").clicked() {
                         self.move_selected_rows(1);
                     }
                     ui.separator();

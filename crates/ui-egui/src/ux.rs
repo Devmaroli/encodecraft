@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, CursorIcon, Id, LayerId, Order, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use encodecraft_job::ScreenSize;
 use encodecraft_presets::{
     ExportPreset, FrameRate, OutputFormat, PresetKind, PresetLibrary, PresetReason, Quality, ScreenMatchRule, BETTER_RES_ID, INSTALLATION_ID,
@@ -75,37 +75,45 @@ impl EncodeApp {
         }
 
         let order: Vec<String> = groups.iter().flat_map(|g| g.job_ids.clone()).collect();
+        let mut geoms: Vec<QueueGeom> = Vec::new();
         egui::ScrollArea::vertical().id_salt("queue-scroll").show(ui, |ui| {
             for g in &groups {
-                self.source_row(ui, g, &jobs, &order);
+                self.source_row(ui, g, &jobs, &order, &mut geoms);
                 if self.collapsed.contains(&g.key) {
                     continue;
                 }
                 for id in &g.job_ids {
                     if let Some(job) = jobs.iter().find(|j| j.id == *id) {
-                        self.output_row(ui, job, &order, &jobs);
+                        self.output_row(ui, job, &order, &jobs, &mut geoms);
                     }
                 }
             }
         });
         self.draw_toast(ui);
-        self.paint_queue_drag_layer(ui, &jobs);
+        self.paint_queue_drag_layer(ui, &jobs, &geoms);
         self.preset_popup(ui, &jobs);
         self.format_popup(ui, &jobs);
     }
 
-    fn source_row(&mut self, ui: &mut Ui, g: &SourceGroup, jobs: &[Job], _order: &[String]) {
+    fn source_row(&mut self, ui: &mut Ui, g: &SourceGroup, jobs: &[Job], _order: &[String], geoms: &mut Vec<QueueGeom>) {
         let t = self.t();
         let w = ui.available_width();
         let locked = group_has_locked(g, jobs);
         let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), sense);
+        geoms.push(QueueGeom {
+            rect,
+            is_source: true,
+            source_key: g.key.clone(),
+            job_id: None,
+            locked,
+            job_ids: g.job_ids.clone(),
+        });
         let dragging_self = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.is_source && d.source_key == g.key);
-        let mut bg = t.header_bg;
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, t.header_bg);
         if dragging_self {
-            bg = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 70);
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(8, 10, 14, 170));
         }
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
         if !locked {
             let drag = QueueDrag { ids: g.job_ids.clone(), source_key: g.key.clone(), is_source: true, label: g.title.clone() };
             if resp.dragged() {
@@ -120,23 +128,6 @@ impl EncodeApp {
         if let Some(pid) = resp.dnd_hover_payload::<String>() {
             ui.painter().rect_stroke(rect, CornerRadius::ZERO, egui::Stroke::new(1.5_f32, t.accent), egui::StrokeKind::Inside);
             let _ = pid;
-        }
-        if let Some(qdrag) = resp.dnd_hover_payload::<QueueDrag>() {
-            let top = pointer_top_half(ui, rect);
-            if qdrag.is_source {
-                paint_insert_line(ui, rect, top, t.accent, drop_dest_for_source(jobs, g, &qdrag.ids, top));
-            } else {
-                paint_forbidden(ui, rect, "Outputs stay with their own source");
-            }
-        }
-        if let Some(qdrag) = resp.dnd_release_payload::<QueueDrag>() {
-            if qdrag.is_source {
-                let top = pointer_top_half(ui, rect);
-                let dest = drop_dest_for_source(jobs, g, &qdrag.ids, top);
-                self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
-            } else {
-                self.show_info_toast("Outputs stay with their own source");
-            }
         }
         if let Some(pid) = resp.dnd_release_payload::<String>() {
             if let Some(like) = g.job_ids.first() {
@@ -186,19 +177,27 @@ impl EncodeApp {
         });
     }
 
-    fn output_row(&mut self, ui: &mut Ui, job: &Job, order: &[String], all: &[Job]) {
+    fn output_row(&mut self, ui: &mut Ui, job: &Job, order: &[String], all: &[Job], geoms: &mut Vec<QueueGeom>) {
         let t = self.t();
         let selected = self.selected_ids.contains(&job.id);
         let locked = job.status.is_order_locked();
         let src_key = job.source.group_key();
-        let mut bg = if selected { t.row_selected } else { t.row };
-        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.iter().any(|id| *id == job.id)) {
-            bg = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 70);
-        }
+        let bg = if selected { t.row_selected } else { t.row };
         let w = ui.available_width();
         let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), sense);
+        geoms.push(QueueGeom {
+            rect,
+            is_source: false,
+            source_key: src_key.clone(),
+            job_id: Some(job.id.clone()),
+            locked,
+            job_ids: vec![job.id.clone()],
+        });
         ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
+        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.iter().any(|id| *id == job.id)) {
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(8, 10, 14, 170));
+        }
         if !locked {
             let mut ids = vec![job.id.clone()];
             if selected && self.selected_ids.len() > 1 {
@@ -207,7 +206,8 @@ impl EncodeApp {
                     ids = vec![job.id.clone()];
                 }
             }
-            let label = job.source.display_name();
+            let name = job.source.display_name();
+            let label = name.rsplit(" / ").next().unwrap_or(&name).to_string();
             let drag = QueueDrag { ids, source_key: src_key.clone(), is_source: false, label };
             if resp.dragged() {
                 egui::DragAndDrop::set_payload(ui.ctx(), drag);
@@ -220,35 +220,6 @@ impl EncodeApp {
         }
         if let Some(_) = resp.dnd_hover_payload::<String>() {
             ui.painter().rect_stroke(rect, CornerRadius::ZERO, egui::Stroke::new(1.5_f32, t.accent), egui::StrokeKind::Inside);
-        }
-        if let Some(qdrag) = resp.dnd_hover_payload::<QueueDrag>() {
-            let top = pointer_top_half(ui, rect);
-            if qdrag.is_source {
-                if let Some(g) = group_jobs(all).iter().find(|g| g.key == src_key) {
-                    paint_insert_line(ui, rect, top, t.accent, drop_dest_for_source(all, g, &qdrag.ids, top));
-                }
-            } else if qdrag.source_key != src_key {
-                paint_forbidden(ui, rect, "Outputs stay with their own source");
-            } else if locked && top {
-                paint_forbidden(ui, rect, "Already rendering · can't be moved");
-            } else {
-                let dest = drop_dest_for_output(all, &job.id, &qdrag.ids, top);
-                paint_insert_line(ui, rect, top, t.accent, dest);
-            }
-        }
-        if let Some(qdrag) = resp.dnd_release_payload::<QueueDrag>() {
-            let top = pointer_top_half(ui, rect);
-            if qdrag.is_source {
-                if let Some(g) = group_jobs(all).iter().find(|g| g.key == src_key) {
-                    let dest = drop_dest_for_source(all, g, &qdrag.ids, top);
-                    self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
-                }
-            } else if qdrag.source_key != src_key {
-                self.show_info_toast("Outputs stay with their own source");
-            } else if !(locked && top) {
-                let dest = drop_dest_for_output(all, &job.id, &qdrag.ids, top);
-                self.apply_queue_reorder(&qdrag.ids, dest, &qdrag.label);
-            }
         }
         if let Some(pid) = resp.dnd_release_payload::<String>() {
             let targets = if selected && self.selected_ids.len() > 1 {
@@ -536,22 +507,71 @@ impl EncodeApp {
         self.apply_queue_reorder(&ids, dest, &label);
     }
 
-    fn paint_queue_drag_layer(&self, ui: &mut Ui, _jobs: &[Job]) {
-        let Some(drag) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) else {
+    fn paint_queue_drag_layer(&mut self, ui: &mut Ui, jobs: &[Job], geoms: &[QueueGeom]) {
+        let Some(drag) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).map(|d| (*d).clone()) else {
             return;
         };
-        let Some(pos) = ui.ctx().pointer_interact_pos() else {
+        let Some(pos) = ui.ctx().pointer_interact_pos().or_else(|| ui.input(|i| i.pointer.hover_pos())) else {
             return;
         };
-        let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("queue-drag-ghost")));
-        let rect = Rect::from_min_size(pos + Vec2::new(12.0, 8.0), Vec2::new(320.0, 34.0));
-        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(0x2d, 0x8c, 0xeb, 70));
-        painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0_f32, Color32::from_rgb(0x2d, 0x8c, 0xeb)), egui::StrokeKind::Inside);
-        painter.text(rect.left_center() + Vec2::new(10.0, 0.0), egui::Align2::LEFT_CENTER, &drag.label, egui::FontId::proportional(13.0), Color32::WHITE);
+        let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, Id::new("queue-drag-overlay")));
+        let t = self.t();
+        let released = ui.input(|i| i.pointer.any_released());
+        if let Some(hit) = hit_geom(geoms, pos) {
+            let top = pos.y < hit.rect.center().y;
+            if drag.is_source {
+                let dest = if hit.is_source {
+                    drop_dest_for_source(jobs, &SourceGroup {
+                        key: hit.source_key.clone(),
+                        title: String::new(),
+                        subtitle: String::new(),
+                        job_ids: hit.job_ids.clone(),
+                    }, &drag.ids, top)
+                } else {
+                    group_jobs(jobs)
+                        .iter()
+                        .find(|g| g.key == hit.source_key)
+                        .map(|g| drop_dest_for_source(jobs, g, &drag.ids, top))
+                        .unwrap_or(0)
+                };
+                paint_insert_line(&painter, hit.rect, top, t.accent, dest);
+                if released {
+                    self.apply_queue_reorder(&drag.ids, dest, &drag.label);
+                }
+            } else if drag.source_key != hit.source_key || hit.is_source {
+                paint_forbidden(&painter, hit.rect, "Outputs stay with their own source");
+                if released {
+                    self.show_info_toast("Outputs stay with their own source");
+                }
+            } else if hit.locked && top {
+                paint_forbidden(&painter, hit.rect, "Already rendering · can't be moved");
+            } else if let Some(id) = &hit.job_id {
+                let dest = drop_dest_for_output(jobs, id, &drag.ids, top);
+                paint_insert_line(&painter, hit.rect, top, t.accent, dest);
+                if released {
+                    self.apply_queue_reorder(&drag.ids, dest, &drag.label);
+                }
+            }
+        }
+        let ghost = Rect::from_min_size(pos + Vec2::new(14.0, 10.0), Vec2::new(420.0, 36.0));
+        painter.rect_filled(ghost, CornerRadius::same(6), Color32::from_rgba_unmultiplied(0x1a, 0x2a, 0x40, 200));
+        painter.rect_stroke(ghost, CornerRadius::same(6), Stroke::new(1.5_f32, t.accent), StrokeKind::Inside);
+        let hx = ghost.left() + 12.0;
+        let hy = ghost.center().y;
+        for dy in [-4.0_f32, 0.0, 4.0] {
+            painter.line_segment([Pos2::new(hx - 5.0, hy + dy), Pos2::new(hx + 5.0, hy + dy)], Stroke::new(1.4, Color32::from_rgb(0xb0, 0xc0, 0xd4)));
+        }
+        painter.text(
+            ghost.left_center() + Vec2::new(24.0, 0.0),
+            Align2::LEFT_CENTER,
+            &drag.label,
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        );
         if drag.ids.len() > 1 {
-            let badge = Rect::from_center_size(rect.right_center() - Vec2::new(36.0, 0.0), Vec2::new(56.0, 20.0));
+            let badge = Rect::from_center_size(ghost.right_center() - Vec2::new(44.0, 0.0), Vec2::new(64.0, 20.0));
             painter.rect_filled(badge, CornerRadius::same(10), Color32::from_rgb(0xc4, 0x3c, 0x4a));
-            painter.text(badge.center(), egui::Align2::CENTER_CENTER, format!("{} items", drag.ids.len()), egui::FontId::proportional(11.0), Color32::WHITE);
+            painter.text(badge.center(), Align2::CENTER_CENTER, format!("{} items", drag.ids.len()), egui::FontId::proportional(11.0), Color32::WHITE);
         }
     }
 
@@ -1174,25 +1194,72 @@ fn drop_dest_for_source(jobs: &[Job], g: &SourceGroup, moving: &[String], top: b
     }
 }
 
+struct QueueGeom {
+    rect: Rect,
+    is_source: bool,
+    source_key: String,
+    job_id: Option<String>,
+    locked: bool,
+    job_ids: Vec<String>,
+}
+
+fn hit_geom(geoms: &[QueueGeom], pos: Pos2) -> Option<&QueueGeom> {
+    geoms.iter().find(|g| g.rect.contains(pos)).or_else(|| {
+        geoms
+            .iter()
+            .filter(|g| pos.x >= g.rect.left() && pos.x <= g.rect.right())
+            .min_by(|a, b| {
+                (a.rect.center().y - pos.y)
+                    .abs()
+                    .total_cmp(&(b.rect.center().y - pos.y).abs())
+            })
+    })
+}
+
 fn paint_grab_or_lock(ui: &mut Ui, locked: bool, t: &Tokens) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(14.0, 16.0), Sense::hover());
+    let painter = ui.painter();
     if locked {
-        ui.label(RichText::new("🔒").size(12.0).color(t.text_faint));
+        resp.on_hover_text("Already rendering · can't be moved");
+        let c = rect.center();
+        painter.rect_stroke(
+            Rect::from_center_size(c + Vec2::new(0.0, 2.5), Vec2::new(8.0, 7.0)),
+            CornerRadius::same(1),
+            Stroke::new(1.3, t.text_faint),
+            StrokeKind::Inside,
+        );
+        painter.circle_stroke(c + Vec2::new(0.0, -1.5), 2.8, Stroke::new(1.3, t.text_faint));
     } else {
-        ui.label(RichText::new("≡").size(14.0).color(t.text_dim));
+        let x0 = rect.center().x - 5.0;
+        let x1 = rect.center().x + 5.0;
+        let y = rect.center().y;
+        for dy in [-4.0_f32, 0.0, 4.0] {
+            painter.line_segment([Pos2::new(x0, y + dy), Pos2::new(x1, y + dy)], Stroke::new(1.5, t.text_dim));
+        }
     }
 }
 
-fn paint_insert_line(ui: &Ui, rect: Rect, top: bool, accent: Color32, dest: usize) {
+fn paint_insert_line(painter: &Painter, rect: Rect, top: bool, accent: Color32, dest: usize) {
     let y = if top { rect.top() } else { rect.bottom() };
-    ui.painter().hline(rect.x_range(), y, Stroke::new(2.0_f32, accent));
+    painter.hline(rect.x_range(), y, Stroke::new(3.0_f32, accent));
+    painter.circle_filled(Pos2::new(rect.left() + 2.0, y), 4.0, accent);
+    painter.circle_filled(Pos2::new(rect.right() - 2.0, y), 4.0, accent);
     let tip = format!("becomes #{n}", n = dest.saturating_add(1));
-    let pos = Pos2::new(rect.center().x, y);
-    ui.painter().text(pos + Vec2::new(0.0, if top { -10.0 } else { 10.0 }), egui::Align2::CENTER_CENTER, tip, egui::FontId::proportional(11.0), accent);
+    let tip_pos = Pos2::new(rect.center().x, y + if top { -12.0 } else { 12.0 });
+    let pill = Rect::from_center_size(tip_pos, Vec2::new(92.0, 18.0));
+    painter.rect_filled(pill, CornerRadius::same(8), Color32::from_rgb(0x12, 0x1c, 0x2c));
+    painter.rect_stroke(pill, CornerRadius::same(8), Stroke::new(1.0_f32, accent), StrokeKind::Inside);
+    painter.text(tip_pos, Align2::CENTER_CENTER, tip, egui::FontId::proportional(11.0), accent);
 }
 
-fn paint_forbidden(ui: &Ui, rect: Rect, msg: &str) {
-    ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.5_f32, Color32::from_rgb(0xc4, 0x3c, 0x4a)), egui::StrokeKind::Inside);
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("🚫  {msg}"), egui::FontId::proportional(12.0), Color32::from_rgb(0xf0, 0xc0, 0xc0));
+fn paint_forbidden(painter: &Painter, rect: Rect, msg: &str) {
+    let red = Color32::from_rgb(0xc4, 0x3c, 0x4a);
+    painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.8_f32, red), StrokeKind::Inside);
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x40, 0x10, 0x12, 90));
+    let c = rect.left_center() + Vec2::new(18.0, 0.0);
+    painter.circle_stroke(c, 7.0, Stroke::new(1.6, red));
+    painter.line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], Stroke::new(1.6, red));
+    painter.text(rect.center() + Vec2::new(10.0, 0.0), Align2::CENTER_CENTER, msg, egui::FontId::proportional(12.0), Color32::from_rgb(0xf0, 0xc0, 0xc0));
 }
 
 struct Cols {

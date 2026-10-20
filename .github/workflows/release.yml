@@ -4,6 +4,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*.*.*"
@@ -60,6 +61,7 @@ jobs:
             dist/SHA256SUMS
 
       - name: GitHub Release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: false

@@ -63,6 +63,9 @@ impl IpcServer {
 }
 
 fn handle_conn(stream: TcpStream, handle: Handle) {
+    // A nonblocking listener accepts nonblocking sockets on Windows. Later
+    // packets of a Content-Length body must block instead of looking truncated.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut peek = [0u8; 8];
@@ -287,6 +290,7 @@ fn write_continue(stream: &mut impl Write) -> std::io::Result<()> {
 fn read_exact_len<R: Read>(reader: &mut R, len: usize) -> std::io::Result<Vec<u8>> {
     let mut body = vec![0u8; len];
     let mut got = 0usize;
+    let started = std::time::Instant::now();
     while got < len {
         match reader.read(&mut body[got..]) {
             Ok(0) => {
@@ -294,6 +298,12 @@ fn read_exact_len<R: Read>(reader: &mut R, len: usize) -> std::io::Result<Vec<u8
             }
             Ok(n) => got += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() > IO_TIMEOUT {
+                    return Err(e);
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
             Err(e) => return Err(e),
         }
     }

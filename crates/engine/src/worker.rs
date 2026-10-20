@@ -23,7 +23,7 @@ pub fn run(h: Handle) {
     while h.is_alive() {
         thread::sleep(Duration::from_millis(250));
         ticks = ticks.wrapping_add(1);
-        if ticks % 4 == 0 && h.take_dirty() {
+        if ticks.is_multiple_of(4) && h.take_dirty() {
             h.persist();
         }
         dispatch(&h);
@@ -308,7 +308,7 @@ fn resolve_source(
         JobSource::EffectCraft { mezzanine, .. } => {
             let cli = h
                 .lock(|s| s.settings.effectcraft_cli.clone())
-                .and_then(|p| if p.is_file() { Some(p) } else { None })
+                .filter(|p| p.is_file())
                 .or_else(|| find_effectcraft_cli().ok())
                 .ok_or(encodecraft_ffmpeg::FfmpegError::EffectCraftMissing)?;
             let out = mezzanine_path(&paths::work_dir(), &job.id, mezzanine);
@@ -510,7 +510,7 @@ pub(crate) fn parse_render_progress(line: &str) -> Option<RenderProgress> {
                 return from_frame_total(n, m);
             }
             if let Some(p) = v.get("percent").or_else(|| v.get("progress")).and_then(json_f32) {
-                let percent = if p <= 1.0 && p >= 0.0 && v.get("percent").is_none() { p * 100.0 } else { p };
+                let percent = if (0.0..=1.0).contains(&p) && v.get("percent").is_none() { p * 100.0 } else { p };
                 return Some(RenderProgress { percent: percent.clamp(0.0, 100.0), frame: n, total });
             }
         }

@@ -107,13 +107,11 @@ pub fn parse_progress_line(line: &str, acc: &mut EncodeProgress, duration_sec: O
                 return true;
             }
         }
-        "progress" => {
-            if v == "end" {
-                acc.done = true;
-                acc.percent = 100.0;
-                acc.eta_sec = Some(0.0);
-                return true;
-            }
+        "progress" if v == "end" => {
+            acc.done = true;
+            acc.percent = 100.0;
+            acc.eta_sec = Some(0.0);
+            return true;
         }
         _ => {}
     }

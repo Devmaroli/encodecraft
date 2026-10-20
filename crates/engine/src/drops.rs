@@ -11,9 +11,7 @@ use crate::fsutil;
 const MAX_DROP_FILES: usize = 256;
 const MAX_ECPROJ_BYTES: u64 = 32 * 1024 * 1024;
 
-pub const VIDEO_EXT: &[&str] = &[
-    "mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m4v", "mpg", "mpeg", "wmv", "flv", "ts", "gif",
-];
+pub const VIDEO_EXT: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m4v", "mpg", "mpeg", "wmv", "flv", "ts", "gif"];
 pub const AUDIO_EXT: &[&str] = &["wav", "mp3", "aac", "m4a", "aif", "aiff", "flac", "ogg", "opus", "wma"];
 pub const STILL_EXT: &[&str] = &["png", "jpg", "jpeg", "exr", "tif", "tiff", "tga", "dpx", "bmp", "webp"];
 
@@ -64,7 +62,10 @@ pub fn is_ecproj(path: &Path) -> bool {
 pub fn classify_dropped_paths(paths: &[PathBuf]) -> DropOutcome {
     let mut out = DropOutcome::default();
     if paths.is_empty() {
-        out.unsupported.push((PathBuf::from("(no path)"), "EncodeCraft needs a file path. Save the EffectCraft project and drop the .ecproj from Explorer, or drop media files.".into()));
+        out.unsupported.push((
+            PathBuf::from("(no path)"),
+            "EncodeCraft needs a file path. Save the EffectCraft project and drop the .ecproj from Explorer, or drop media files.".into(),
+        ));
         return out;
     }
     for p in paths {
@@ -225,7 +226,7 @@ fn parse_numbered_stem(path: &Path) -> Option<(String, u32, usize)> {
 /// FFmpeg `-i` pattern and digit width for a first-frame still (`hero_0001.png` → `hero_%04d.png`).
 #[cfg(test)]
 pub fn ffmpeg_sequence_pattern(first_frame: &Path) -> Option<(PathBuf, u32, usize)> {
-    let ( _key, num, width) = parse_numbered_stem(first_frame)?;
+    let (_key, num, width) = parse_numbered_stem(first_frame)?;
     let stem = first_frame.file_stem()?.to_str()?;
     let prefix = &stem[..stem.len() - width];
     let ext = first_frame.extension()?.to_string_lossy();
@@ -333,10 +334,7 @@ fn walk_comp_sizes(v: &serde_json::Value, parent_key: Option<&str>, out: &mut Ve
 fn dims_of_map(map: &serde_json::Map<String, serde_json::Value>) -> Option<(u32, u32)> {
     let num = |key: &str| -> Option<u32> {
         let v = map.get(key)?;
-        let n = v
-            .as_u64()
-            .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
-            .or_else(|| v.as_f64().map(|f| f.round() as u64))?;
+        let n = v.as_u64().or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok())).or_else(|| v.as_f64().map(|f| f.round() as u64))?;
         if (1..100_000).contains(&n) {
             Some(n as u32)
         } else {
@@ -365,7 +363,9 @@ fn walk_comps(v: &serde_json::Value, out: &mut Vec<String>, parent_key: Option<&
         serde_json::Value::Array(arr) => {
             if parent_key.is_some_and(key_is_comps) {
                 for item in arr {
-                    if let Some(n) = comp_name(item).or_else(|| item.as_object().and_then(|o| o.get("name").or_else(|| o.get("id"))).and_then(|x| x.as_str()).map(|s| s.to_string())) {
+                    if let Some(n) = comp_name(item)
+                        .or_else(|| item.as_object().and_then(|o| o.get("name").or_else(|| o.get("id"))).and_then(|x| x.as_str()).map(|s| s.to_string()))
+                    {
                         push_name(out, n);
                     }
                 }
@@ -403,12 +403,7 @@ fn key_is_comps(k: &str) -> bool {
 }
 
 fn typed_comp_name(map: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    let kind = map
-        .get("type")
-        .or_else(|| map.get("kind"))
-        .or_else(|| map.get("itemType"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let kind = map.get("type").or_else(|| map.get("kind")).or_else(|| map.get("itemType")).and_then(|v| v.as_str()).unwrap_or("");
     let kl = kind.to_ascii_lowercase();
     let is_comp = kl == "composition" || kl == "comp" || map.get("isComp").and_then(|v| v.as_bool()) == Some(true);
     if !is_comp {
@@ -476,7 +471,7 @@ mod tests {
         let dir = tmp();
         let p = dir.join("spot.ecproj");
         std::fs::write(&p, br#"{"compositions":[{"name":"Main"}]}"#).unwrap();
-        let out = classify_dropped_paths(&[p.clone()]);
+        let out = classify_dropped_paths(std::slice::from_ref(&p));
         assert_eq!(out.projects, vec![p]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -488,7 +483,7 @@ mod tests {
             std::fs::write(dir.join(format!("hero_{i:04}.png")), b"x").unwrap();
         }
         std::fs::write(dir.join("readme.txt"), b"no").unwrap();
-        let out = classify_dropped_paths(&[dir.clone()]);
+        let out = classify_dropped_paths(std::slice::from_ref(&dir));
         assert_eq!(out.sequences.len(), 1);
         assert_eq!(out.sequences[0].start, 1);
         assert_eq!(out.sequences[0].frames, 4);
@@ -550,7 +545,7 @@ mod tests {
     fn folder_with_only_junk_is_unsupported() {
         let dir = tmp();
         std::fs::write(dir.join("todo.docx"), b"x").unwrap();
-        let out = classify_dropped_paths(&[dir.clone()]);
+        let out = classify_dropped_paths(std::slice::from_ref(&dir));
         assert!(out.is_empty());
         assert!(!out.unsupported.is_empty());
         let _ = std::fs::remove_dir_all(&dir);

@@ -83,13 +83,7 @@ pub struct ScreenMatchRule {
 
 impl ScreenMatchRule {
     pub fn new(name: impl Into<String>, aliases: &[&str], width: u32, height: u32, match_dims: bool) -> Self {
-        Self {
-            name: name.into(),
-            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
-            width: Some(width),
-            height: Some(height),
-            match_dims,
-        }
+        Self { name: name.into(), aliases: aliases.iter().map(|s| (*s).to_string()).collect(), width: Some(width), height: Some(height), match_dims }
     }
 }
 
@@ -143,13 +137,7 @@ fn listed_v1() -> Vec<ScreenMatchRule> {
     vec![
         ScreenMatchRule::new("1st Ring Road", &["1st ring", "first ring road"], 1008, 5184, true),
         ScreenMatchRule::new("Al Nassar Tower Vertical", &["al nassar", "nassar tower vertical", "nassar tower"], 960, 5328, true),
-        ScreenMatchRule::new(
-            "The Avenues Grand Avenues Entrance",
-            &["grand avenues", "avenues entrance"],
-            1920,
-            1080,
-            false,
-        ),
+        ScreenMatchRule::new("The Avenues Grand Avenues Entrance", &["grand avenues", "avenues entrance"], 1920, 1080, false),
         ScreenMatchRule::new("The Avenues The Mall Entrance", &["the mall entrance"], 1920, 1080, false),
         ScreenMatchRule::new("The Avenues Grand Plaza Entrance", &["grand plaza"], 1920, 1080, false),
     ]
@@ -157,13 +145,7 @@ fn listed_v1() -> Vec<ScreenMatchRule> {
 
 fn listed_v2() -> Vec<ScreenMatchRule> {
     vec![
-        ScreenMatchRule::new(
-            "The Avenues – Eye of Kuwait",
-            &["eye of kuwait", "avenues eye of kuwait", "the avenues – eye of kuwait"],
-            7560,
-            2100,
-            true,
-        ),
+        ScreenMatchRule::new("The Avenues – Eye of Kuwait", &["eye of kuwait", "avenues eye of kuwait", "the avenues – eye of kuwait"], 7560, 2100, true),
         ScreenMatchRule::new("Al Salam Sync", &["al salam", "salam sync"], 3072, 576, true),
         ScreenMatchRule::new("Piccadilly", &["piccadilly single"], 2027, 720, true),
         ScreenMatchRule::new("Piccadilly Combined", &["piccadilly combined"], 6080, 720, true),
@@ -610,8 +592,7 @@ mod tests {
 
     #[test]
     fn disabled_rules_do_not_pick() {
-        let mut r = ScreenPresetRules::default();
-        r.enabled = false;
+        let r = ScreenPresetRules { enabled: false, ..ScreenPresetRules::default() };
         assert!(r.pick(Some(&ScreenSize::new("The Avenues Gate", 100, 100)), "", None).is_none());
     }
 

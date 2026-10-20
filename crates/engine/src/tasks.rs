@@ -57,10 +57,7 @@ pub fn start(handle: Handle) -> IoHub {
     let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>();
     let worker = handle.clone();
     let events = ui_tx.clone();
-    thread::Builder::new()
-        .name("encodecraft-io".into())
-        .spawn(move || io_loop(worker, cmd_rx, ui_tx))
-        .ok();
+    thread::Builder::new().name("encodecraft-io".into()).spawn(move || io_loop(worker, cmd_rx, ui_tx)).ok();
     IoHub { tx: cmd_tx, events, rx: Arc::new(Mutex::new(ui_rx)) }
 }
 
@@ -190,10 +187,8 @@ fn thumb_one(h: &Handle, id: &str, ui: &Sender<UiEvent>) {
     };
     let dest = paths::thumbs_dir().join(format!("{}.jpg", job.id));
     let t0 = Instant::now();
-    if !dest.exists() {
-        if thumbnail_png(&ff, &src, &dest, job.trim.in_sec.max(0.1)).is_err() {
-            return;
-        }
+    if !dest.exists() && thumbnail_png(&ff, &src, &dest, job.trim.in_sec.max(0.1)).is_err() {
+        return;
     }
     emit_slow(ui, "thumbnail", t0);
     let Ok(bytes) = std::fs::read(&dest) else {
@@ -211,7 +206,9 @@ fn thumb_one(h: &Handle, id: &str, ui: &Sender<UiEvent>) {
 fn list_ecproj(path: &std::path::Path, ui: &Sender<UiEvent>) {
     let t0 = Instant::now();
     let (comps, note) = match list_ecproj_compositions_file(path) {
-        Ok(c) if c.is_empty() => (Vec::new(), Some("Could not list compositions in this project. Queue with EffectCraft’s default/first comp, or type a name.".into())),
+        Ok(c) if c.is_empty() => {
+            (Vec::new(), Some("Could not list compositions in this project. Queue with EffectCraft’s default/first comp, or type a name.".into()))
+        }
         Ok(c) => (c, None),
         Err(e) => (Vec::new(), Some(format!("Could not read project ({e}). Queue with the default composition, or type a name."))),
     };

@@ -568,33 +568,57 @@ mod tests {
         assert_eq!(lines.len(), 3);
     }
 
+    fn mock_cli_file(dir: &Path) -> PathBuf {
+        if cfg!(windows) {
+            dir.join("effectcraft-cli.cmd")
+        } else {
+            dir.join("effectcraft-cli")
+        }
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn help_mock_source(counter: Option<&Path>) -> String {
+        if cfg!(windows) {
+            let tick = counter.map(|p| format!("echo x>>\"{}\"\r\n", p.display())).unwrap_or_default();
+            format!(
+                "@echo off\r\n{tick}if /I \"%1\"==\"render\" if /I \"%2\"==\"--help\" (\r\n  echo Usage: render --format yuv420p --sidecar FILE --gpu --audio-out FILE --fps N\r\n  exit /b 0\r\n)\r\nif /I \"%1\"==\"serve\" if /I \"%2\"==\"--help\" (\r\n  echo Usage: serve --control PORT --idle-exit --gpu\r\n  exit /b 0\r\n)\r\necho effectcraft-cli commands: render serve\r\nexit /b 0\r\n"
+            )
+        } else {
+            let tick = counter.map(|p| format!("echo x >> \"{}\"\n", p.display())).unwrap_or_default();
+            format!(
+                "#!/bin/sh\n{tick}case \" $* \" in\n  *\" render \"*\" --help \"*|*\" render --help \"*)\n    echo \"Usage: render --format yuv420p|prores --sidecar FILE --gpu --audio-out FILE --fps N\"\n    exit 0\n    ;;\n  *\" serve \"*\" --help \"*|*\" serve --help \"*)\n    echo \"Usage: serve --control PORT --idle-exit --gpu\"\n    exit 0\n    ;;\nesac\necho \"effectcraft-cli commands: render serve\"\n"
+            )
+        }
+    }
+
+    fn changed_help_mock_source(counter: &Path) -> String {
+        if cfg!(windows) {
+            format!(
+                "@echo off\r\necho x>>\"{}\"\r\necho Usage: render --format yuv420p --sidecar FILE --fps N extra-bytes-to-change-size\r\necho Usage: serve --control PORT\r\n",
+                counter.display()
+            )
+        } else {
+            format!(
+                "#!/bin/sh\necho x >> \"{}\"\necho \"Usage: render --format yuv420p --sidecar FILE --fps N extra-bytes-to-change-size\"\necho \"Usage: serve --control PORT\"\n",
+                counter.display()
+            )
+        }
+    }
+
     #[test]
     fn mock_cli_help_enables_streaming_caps() {
         let dir = std::env::temp_dir().join(format!("ec-mockcli-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let script = dir.join("effectcraft-cli");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-case " $* " in
-  *" render "*" --help "*|*" render --help "*)
-    echo "Usage: render --format yuv420p|prores --sidecar FILE --gpu --audio-out FILE --fps N"
-    exit 0
-    ;;
-  *" serve "*" --help "*|*" serve --help "*)
-    echo "Usage: serve --control PORT --idle-exit --gpu"
-    exit 0
-    ;;
-esac
-echo "effectcraft-cli commands: render serve"
-"#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script = mock_cli_file(&dir);
+        write_executable(&script, &help_mock_source(None));
         let caps = probe_cli_caps(&script);
         assert!(caps.streaming(), "{caps:?}");
         assert!(caps.serve, "{caps:?}");
@@ -675,35 +699,10 @@ echo "effectcraft-cli commands: render serve"
         clear_cli_caps_cache();
         let dir = std::env::temp_dir().join(format!("ec-capscache-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let script = dir.join("effectcraft-cli");
+        let script = mock_cli_file(&dir);
         let counter = dir.join("helps");
         std::fs::write(&counter, "0").unwrap();
-        std::fs::write(
-            &script,
-            format!(
-                r#"#!/bin/sh
-echo x >> "{}"
-case " $* " in
-  *" render "*" --help "*|*" render --help "*)
-    echo "Usage: render --format yuv420p --sidecar FILE --gpu --audio-out FILE --fps N"
-    exit 0
-    ;;
-  *" serve "*" --help "*|*" serve --help "*)
-    echo "Usage: serve --control PORT --idle-exit --gpu"
-    exit 0
-    ;;
-esac
-echo "effectcraft-cli commands: render serve"
-"#,
-                counter.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_executable(&script, &help_mock_source(Some(&counter)));
         let a = probe_cli_caps(&script);
         assert!(a.streaming() && a.fps_flag, "{a:?}");
         let n1 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
@@ -712,23 +711,7 @@ echo "effectcraft-cli commands: render serve"
         let n2 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
         assert_eq!(n1, n2, "second probe must not spawn --help again");
         assert!(n1 >= 2, "first probe runs render --help and serve --help, got {n1}");
-        std::fs::write(
-            &script,
-            format!(
-                r#"#!/bin/sh
-echo x >> "{}"
-echo "Usage: render --format yuv420p --sidecar FILE --fps N extra-bytes-to-change-size"
-echo "Usage: serve --control PORT"
-"#,
-                counter.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_executable(&script, &changed_help_mock_source(&counter));
         let _ = probe_cli_caps(&script);
         let n3 = std::fs::read_to_string(&counter).unwrap().lines().filter(|l| !l.is_empty()).count();
         assert!(n3 > n2, "changed exe size/mtime must re-probe, {n3} vs {n2}");

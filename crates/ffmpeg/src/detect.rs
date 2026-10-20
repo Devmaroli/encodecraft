@@ -473,24 +473,36 @@ mod tests {
 
     #[test]
     fn effectcraft_search_order_env_sidecar_registry_sibling_then_path() {
-        let encode = PathBuf::from(r"/home/ada/.local/Programs/Craft/EncodeCraft/encodecraft");
-        let registry = PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft");
-        let path_dir = PathBuf::from("/usr/bin");
+        let (encode, registry, path_dir, env) = if cfg!(windows) {
+            (
+                PathBuf::from(r"C:\home\ada\.local\Programs\Craft\EncodeCraft\encodecraft"),
+                PathBuf::from(r"C:\home\ada\.local\Programs\Craft\effectcraft"),
+                PathBuf::from(r"C:\usr\bin"),
+                PathBuf::from(r"C:\opt\override\effectcraft-cli"),
+            )
+        } else {
+            (
+                PathBuf::from(r"/home/ada/.local/Programs/Craft/EncodeCraft/encodecraft"),
+                PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/override/effectcraft-cli"),
+            )
+        };
         let lookup = EffectcraftLookup {
-            env: Some(PathBuf::from("/opt/override/effectcraft-cli")),
-            current_exe: Some(encode),
-            registry_install_dir: Some(registry),
-            path_dirs: vec![path_dir],
+            env: Some(env.clone()),
+            current_exe: Some(encode.clone()),
+            registry_install_dir: Some(registry.clone()),
+            path_dirs: vec![path_dir.clone()],
             extra: vec![],
         };
         let c = effectcraft_search_candidates(&lookup);
         let name = cli_name();
-        assert_eq!(c[0], PathBuf::from("/opt/override/effectcraft-cli"));
-        assert_eq!(c[1], PathBuf::from("/opt/override/effectcraft-cli").join(name));
-        assert_eq!(c[2], PathBuf::from(r"/home/ada/.local/Programs/Craft/EncodeCraft").join(name));
-        assert_eq!(c[3], PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft").join(name));
-        assert_eq!(c[4], PathBuf::from(r"/home/ada/.local/Programs/Craft/effectcraft").join(name));
-        assert_eq!(c[5], PathBuf::from("/usr/bin").join(name));
+        assert_eq!(c[0], env);
+        assert_eq!(c[1], env.join(name));
+        assert_eq!(c[2], encode.parent().unwrap().join(name));
+        assert_eq!(c[3], registry.join(name));
+        assert_eq!(c[4], encode.parent().unwrap().parent().unwrap().join("effectcraft").join(name));
+        assert_eq!(c[5], path_dir.join(name));
         assert_eq!(c.len(), 6);
     }
 

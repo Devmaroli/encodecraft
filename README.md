@@ -40,7 +40,7 @@ EffectCraft encodes in **pure Rust** (no FFmpeg). EncodeCraft **shells out** to 
 
 ## Requirements
 
-- Rust 1.85+ (`rustup`)
+- Rust 1.99+ (`rustup`)
 - FFmpeg **and** ffprobe on `PATH`, or `FFMPEG_PATH`
 - Linux: a working display for the GUI (X11 or Wayland). The CLI encodes without a window.
 

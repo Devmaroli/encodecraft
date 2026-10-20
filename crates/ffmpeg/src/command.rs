@@ -273,12 +273,11 @@ fn build_encode_plan_pass(input: &PlanInput<'_>, pass: Option<u8>, passlogfile: 
 pub fn argv_path(p: &Path) -> String {
     let s = p.to_string_lossy();
     let fname = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-    if s.starts_with('-') || fname.starts_with('-') {
-        if p.is_absolute() {
-            s.into_owned()
-        } else {
-            format!("./{}", s.trim_start_matches("./"))
-        }
+    // `/tmp/...` is absolute on Unix. On Windows it is not, but it still does not
+    // look like an FFmpeg option, so leave it unchanged.
+    let rooted = p.is_absolute() || s.starts_with('/') || s.starts_with('\\');
+    if (s.starts_with('-') || fname.starts_with('-')) && !rooted {
+        format!("./{}", s.trim_start_matches("./"))
     } else {
         s.into_owned()
     }

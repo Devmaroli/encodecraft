@@ -68,15 +68,7 @@ pub fn frame_at_25(out_time_sec: f64, frame: u64) -> u64 {
 }
 
 /// Grab one JPEG of `input`. When `growing` is set, read near the end of a file still being written.
-pub fn grab_preview_jpeg(
-    ff: &Ffmpeg,
-    dest: &Path,
-    output_w: u32,
-    output_h: u32,
-    input: &Path,
-    at_sec: Option<f64>,
-    growing: bool,
-) -> Result<(), FfmpegError> {
+pub fn grab_preview_jpeg(ff: &Ffmpeg, dest: &Path, output_w: u32, output_h: u32, input: &Path, at_sec: Option<f64>, growing: bool) -> Result<(), FfmpegError> {
     if !input.exists() {
         return Err(FfmpegError::Message(format!("preview source missing: {}", input.display())));
     }
@@ -167,7 +159,20 @@ mod tests {
         let src = dir.join("src.mp4");
         let dest = dir.join("p.jpg");
         let status = Command::new(&ff.ffmpeg)
-            .args(["-hide_banner", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=0.4", "-frames:v", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .args([
+                "-hide_banner",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=25:duration=0.4",
+                "-frames:v",
+                "4",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
             .arg(&src)
             .status();
         if !status.map(|s| s.success()).unwrap_or(false) {

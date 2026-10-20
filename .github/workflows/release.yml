@@ -4,6 +4,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*.*.*"
@@ -22,7 +23,7 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85"
+          toolchain: "1.99"
           targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo
@@ -60,6 +61,7 @@ jobs:
             dist/SHA256SUMS
 
       - name: GitHub Release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: false

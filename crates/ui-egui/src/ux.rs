@@ -66,7 +66,10 @@ impl EncodeApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Queue").strong().size(14.0));
             let idle = !self.queue_running;
-            ui.label(RichText::new(format!("{} item{} · {}", jobs.len(), if jobs.len() == 1 { "" } else { "s" }, if idle { "Idle" } else { "running" })).color(t.text_dim));
+            ui.label(
+                RichText::new(format!("{} item{} · {}", jobs.len(), if jobs.len() == 1 { "" } else { "s" }, if idle { "Idle" } else { "running" }))
+                    .color(t.text_dim),
+            );
             if better + inst > 0 {
                 ui.separator();
                 studio_count_chip(ui, t.warning, &format!("{better} × Better Res"));
@@ -81,11 +84,10 @@ impl EncodeApp {
             if nsel > 0 && ui.button(format!("Remove selected ({nsel})")).clicked() {
                 self.request_remove_selected(&jobs);
             }
-            if jobs.iter().any(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped))
-                && ui.button("Clear finished").clicked()
-            {
-                let before = jobs.iter().cloned().collect::<Vec<_>>();
-                let removed: Vec<Job> = before.iter().filter(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped)).cloned().collect();
+            if jobs.iter().any(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped)) && ui.button("Clear finished").clicked() {
+                let before = jobs.to_vec();
+                let removed: Vec<Job> =
+                    before.iter().filter(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed | JobStatus::Stopped)).cloned().collect();
                 let order = before.iter().map(|j| j.id.clone()).collect::<Vec<_>>();
                 self.handle.lock(|s| s.queue.remove_finished());
                 self.toast = Some(UndoToast {
@@ -137,17 +139,14 @@ impl EncodeApp {
         let toast_h = if self.toast.as_ref().is_some_and(|t| Instant::now() <= t.until) { 40.0 } else { 0.0 };
         let footer_h = if self.selected_ids.is_empty() { 0.0 } else { 26.0 };
         let scroll_h = (ui.available_height() - toast_h - footer_h).max(120.0);
-        let scroll = egui::ScrollArea::vertical()
-            .id_salt("queue-scroll")
-            .max_height(scroll_h)
-            .show_rows(ui, ROW_H, flat.len(), |ui, range| {
-                for i in range {
-                    match flat[i] {
-                        FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
-                        FlatRow::Output(job) => self.output_row(ui, job, &order, &jobs, &mut geoms),
-                    }
+        let scroll = egui::ScrollArea::vertical().id_salt("queue-scroll").max_height(scroll_h).show_rows(ui, ROW_H, flat.len(), |ui, range| {
+            for i in range {
+                match flat[i] {
+                    FlatRow::Source(g) => self.source_row(ui, g, &jobs, &order, &mut geoms),
+                    FlatRow::Output(job) => self.output_row(ui, job, &order, &jobs, &mut geoms),
                 }
-            });
+            }
+        });
         self.update_marquee(ui, &geoms, &order, scroll.inner_rect);
         self.paint_marquee(ui, scroll.inner_rect);
         self.draw_toast(ui);
@@ -179,11 +178,7 @@ impl EncodeApp {
     }
 
     fn update_marquee(&mut self, ui: &mut Ui, geoms: &[QueueGeom], _order: &[String], scroll_rect: Rect) {
-        let pos = ui
-            .ctx()
-            .pointer_interact_pos()
-            .or_else(|| ui.input(|i| i.pointer.hover_pos()))
-            .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+        let pos = ui.ctx().pointer_interact_pos().or_else(|| ui.input(|i| i.pointer.hover_pos())).or_else(|| ui.input(|i| i.pointer.latest_pos()));
         let (pressed, down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.any_released()));
         if let Some(pos) = pos {
             if let Some(m) = &mut self.marquee {
@@ -201,13 +196,7 @@ impl EncodeApp {
                 let rect = Rect::from_two_pos(m.start, m.current);
                 let items: Vec<(String, Rect)> = geoms
                     .iter()
-                    .flat_map(|g| {
-                        if let Some(id) = &g.job_id {
-                            vec![(id.clone(), g.rect)]
-                        } else {
-                            g.job_ids.iter().map(|id| (id.clone(), g.rect)).collect()
-                        }
-                    })
+                    .flat_map(|g| if let Some(id) = &g.job_id { vec![(id.clone(), g.rect)] } else { g.job_ids.iter().map(|id| (id.clone(), g.rect)).collect() })
                     .collect();
                 let hits = crate::select::ids_touching_marquee(&items, rect);
                 let mode = if m.toggle {
@@ -235,13 +224,7 @@ impl EncodeApp {
                 return;
             }
             let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
-            self.marquee = Some(MarqueeState {
-                start: pos,
-                current: pos,
-                add: mods.1,
-                toggle: mods.0,
-                base: self.selected_ids.clone(),
-            });
+            self.marquee = Some(MarqueeState { start: pos, current: pos, add: mods.1, toggle: mods.0, base: self.selected_ids.clone() });
         }
     }
 
@@ -325,14 +308,7 @@ impl EncodeApp {
         let locked = group_has_locked(g, jobs);
         let sense = if locked { Sense::click() } else { Sense::click_and_drag() };
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), sense);
-        geoms.push(QueueGeom {
-            rect,
-            is_source: true,
-            source_key: g.key.clone(),
-            job_id: None,
-            locked,
-            job_ids: g.job_ids.clone(),
-        });
+        geoms.push(QueueGeom { rect, is_source: true, source_key: g.key.clone(), job_id: None, locked, job_ids: g.job_ids.clone() });
         let dragging_self = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.is_source && d.source_key == g.key);
         ui.painter().rect_filled(rect, CornerRadius::ZERO, t.header_bg);
         if g.job_ids.iter().any(|id| self.selected_ids.contains(id)) {
@@ -397,7 +373,8 @@ impl EncodeApp {
             }
         }
         let collapsed = self.collapsed.contains(&g.key);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let mut child =
+            ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.horizontal(|ui| {
             paint_grab_or_lock(ui, locked, &t);
             ui.label(RichText::new(if collapsed { ">" } else { "v" }).color(t.text_dim).strong());
@@ -435,14 +412,7 @@ impl EncodeApp {
         let w = ui.available_width();
         let sense = Sense::click_and_drag();
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), sense);
-        geoms.push(QueueGeom {
-            rect,
-            is_source: false,
-            source_key: src_key.clone(),
-            job_id: Some(job.id.clone()),
-            locked,
-            job_ids: vec![job.id.clone()],
-        });
+        geoms.push(QueueGeom { rect, is_source: false, source_key: src_key.clone(), job_id: Some(job.id.clone()), locked, job_ids: vec![job.id.clone()] });
         ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
         if selected {
             ui.painter().vline(rect.left() + 1.5, rect.y_range(), Stroke::new(3.0_f32, t.accent));
@@ -452,13 +422,18 @@ impl EncodeApp {
             let bar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 3.0), Pos2::new(rect.left() + w, rect.bottom()));
             ui.painter().rect_filled(bar, CornerRadius::ZERO, t.accent);
         }
-        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.iter().any(|id| *id == job.id)) {
+        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.ids.contains(&job.id)) {
             ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(8, 10, 14, 170));
         }
         if !locked {
             let mut ids = vec![job.id.clone()];
             if selected && self.selected_ids.len() > 1 {
-                ids = self.selected_ids.iter().filter(|id| all.iter().any(|j| j.id == **id && j.source.group_key() == src_key && !j.status.is_order_locked())).cloned().collect();
+                ids = self
+                    .selected_ids
+                    .iter()
+                    .filter(|id| all.iter().any(|j| j.id == **id && j.source.group_key() == src_key && !j.status.is_order_locked()))
+                    .cloned()
+                    .collect();
                 if ids.is_empty() {
                     ids = vec![job.id.clone()];
                 }
@@ -476,15 +451,11 @@ impl EncodeApp {
         } else {
             let _ = resp.clone().on_hover_text("Already rendering · can't be moved");
         }
-        if let Some(_) = resp.dnd_hover_payload::<String>() {
+        if resp.dnd_hover_payload::<String>().is_some() {
             ui.painter().rect_stroke(rect, CornerRadius::ZERO, egui::Stroke::new(1.5_f32, t.accent), egui::StrokeKind::Inside);
         }
         if let Some(pid) = resp.dnd_release_payload::<String>() {
-            let targets = if selected && self.selected_ids.len() > 1 {
-                self.selected_ids.clone()
-            } else {
-                vec![job.id.clone()]
-            };
+            let targets = if selected && self.selected_ids.len() > 1 { self.selected_ids.clone() } else { vec![job.id.clone()] };
             self.apply_preset_ids(&targets, pid.as_str());
         }
         let mods = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
@@ -505,16 +476,13 @@ impl EncodeApp {
                 let name = job.source.display_name();
                 let comp = name.rsplit(" / ").next().unwrap_or(&name);
                 ui.label(RichText::new(comp).strong().size(12.5));
-                let sub = job.screen.as_ref().map(|s| {
-                    if s.width > 0 {
-                        format!("{} · {}×{}", s.name, s.width, s.height)
-                    } else {
-                        s.name.clone()
-                    }
-                }).unwrap_or_else(|| match (job.preset.video.width, job.preset.video.height) {
-                    (Some(w), Some(h)) => format!("Match source · {w}×{h}"),
-                    _ => "Match source".into(),
-                });
+                let sub =
+                    job.screen.as_ref().map(|s| if s.width > 0 { format!("{} · {}×{}", s.name, s.width, s.height) } else { s.name.clone() }).unwrap_or_else(
+                        || match (job.preset.video.width, job.preset.video.height) {
+                            (Some(w), Some(h)) => format!("Match source · {w}×{h}"),
+                            _ => "Match source".into(),
+                        },
+                    );
                 ui.label(RichText::new(sub).size(10.5).color(t.text_dim));
             });
         });
@@ -539,7 +507,7 @@ impl EncodeApp {
             if job.preset_overridden {
                 let reset = ui.add(egui::Label::new(RichText::new("↺ Auto").color(t.link).size(11.0)).sense(Sense::click()));
                 if reset.clicked() {
-                    let _ = self.handle.lock(|s| s.reset_jobs_to_auto(&[job.id.clone()]));
+                    let _ = self.handle.lock(|s| s.reset_jobs_to_auto(std::slice::from_ref(&job.id)));
                     self.handle.mark_dirty();
                 }
             }
@@ -547,11 +515,7 @@ impl EncodeApp {
         let mut out_ui = ui.new_child(egui::UiBuilder::new().max_rect(cols.out).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let out_label = display_path(&job.output);
         let folder_tip = job.output.parent().map(display_path).unwrap_or_else(|| out_label.clone());
-        let out_r = out_ui.add(
-            egui::Label::new(RichText::new(out_label).size(11.0).color(t.link))
-                .truncate()
-                .sense(Sense::click()),
-        );
+        let out_r = out_ui.add(egui::Label::new(RichText::new(out_label).size(11.0).color(t.link)).truncate().sense(Sense::click()));
         let out_r = out_r.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("{folder_tip}\nOpen in File Explorer"));
         if out_r.hovered() {
             out_ui.painter().hline(out_r.rect.x_range(), out_r.rect.bottom() - 3.0, Stroke::new(1.0_f32, t.link));
@@ -564,7 +528,11 @@ impl EncodeApp {
             if job.metadata_pending {
                 ui.add(egui::Spinner::new().size(11.0));
             }
-            ui.label(RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() }).size(11.5).color(crate::status_color(job.status, &t)));
+            ui.label(
+                RichText::new(if job.status == JobStatus::Waiting { "Ready" } else { job.status.label() })
+                    .size(11.5)
+                    .color(crate::status_color(job.status, &t)),
+            );
             if job.status == JobStatus::Encoding && !job.progress.stage.is_empty() {
                 ui.label(RichText::new(&job.progress.stage).size(10.0).color(t.text_dim));
                 if job.progress.stage.starts_with("Rendering comp") && job.progress.frame > 0 && job.progress.total_frames > 0 {
@@ -579,11 +547,7 @@ impl EncodeApp {
                 let min_k = job.preset.video.quality.effective_min_kbps().map(|k| k as f32);
                 let below = min_k.is_some_and(|m| kbps + 20.0 < m);
                 let col = if below { t.warning } else { t.text_dim };
-                let label = if below {
-                    format!("{mbps:.1} Mbps · under min")
-                } else {
-                    format!("{mbps:.1} Mbps")
-                };
+                let label = if below { format!("{mbps:.1} Mbps · under min") } else { format!("{mbps:.1} Mbps") };
                 ui.label(RichText::new(label).size(10.5).color(col));
             }
         });
@@ -731,13 +695,8 @@ impl EncodeApp {
     }
 
     pub(crate) fn show_info_toast(&mut self, message: impl Into<String>) {
-        self.toast = Some(UndoToast {
-            message: message.into(),
-            snapshot: Vec::new(),
-            order: None,
-            removed: Vec::new(),
-            until: Instant::now() + Duration::from_secs(6),
-        });
+        self.toast =
+            Some(UndoToast { message: message.into(), snapshot: Vec::new(), order: None, removed: Vec::new(), until: Instant::now() + Duration::from_secs(6) });
     }
 
     fn reveal_in_explorer(&mut self, path: &Path) {
@@ -776,11 +735,7 @@ impl EncodeApp {
         match self.handle.lock(|s| s.queue.reorder(ids, dest)) {
             Ok(pos) => {
                 self.toast = Some(UndoToast {
-                    message: if ids.len() > 1 {
-                        format!("Moved {} items · {label} now #{pos}", ids.len())
-                    } else {
-                        format!("Moved {label} to #{pos}")
-                    },
+                    message: if ids.len() > 1 { format!("Moved {} items · {label} now #{pos}", ids.len()) } else { format!("Moved {label} to #{pos}") },
                     snapshot: Vec::new(),
                     order: Some(before),
                     removed: Vec::new(),
@@ -801,9 +756,7 @@ impl EncodeApp {
             let min = ids.iter().filter_map(|id| s.queue.index_of(id)).min().unwrap_or(0);
             min.saturating_add_signed(delta)
         });
-        let label = self.handle.lock(|s| {
-            s.queue.jobs.iter().find(|j| j.id == ids[0]).map(|j| j.source.display_name()).unwrap_or_else(|| "rows".into())
-        });
+        let label = self.handle.lock(|s| s.queue.jobs.iter().find(|j| j.id == ids[0]).map(|j| j.source.display_name()).unwrap_or_else(|| "rows".into()));
         self.apply_queue_reorder(&ids, dest, &label);
     }
 
@@ -821,18 +774,14 @@ impl EncodeApp {
             let top = pos.y < hit.rect.center().y;
             if drag.is_source {
                 let dest = if hit.is_source {
-                    drop_dest_for_source(jobs, &SourceGroup {
-                        key: hit.source_key.clone(),
-                        title: String::new(),
-                        subtitle: String::new(),
-                        job_ids: hit.job_ids.clone(),
-                    }, &drag.ids, top)
+                    drop_dest_for_source(
+                        jobs,
+                        &SourceGroup { key: hit.source_key.clone(), title: String::new(), subtitle: String::new(), job_ids: hit.job_ids.clone() },
+                        &drag.ids,
+                        top,
+                    )
                 } else {
-                    group_jobs(jobs)
-                        .iter()
-                        .find(|g| g.key == hit.source_key)
-                        .map(|g| drop_dest_for_source(jobs, g, &drag.ids, top))
-                        .unwrap_or(0)
+                    group_jobs(jobs).iter().find(|g| g.key == hit.source_key).map(|g| drop_dest_for_source(jobs, g, &drag.ids, top)).unwrap_or(0)
                 };
                 paint_insert_line(&painter, hit.rect, top, t.accent, dest);
                 if released {
@@ -859,15 +808,9 @@ impl EncodeApp {
         let hx = ghost.left() + 12.0;
         let hy = ghost.center().y;
         for dy in [-4.0_f32, 0.0, 4.0] {
-            painter.line_segment([Pos2::new(hx - 5.0, hy + dy), Pos2::new(hx + 5.0, hy + dy)], Stroke::new(1.4, Color32::from_rgb(0xb0, 0xc0, 0xd4)));
+            painter.line_segment([Pos2::new(hx - 5.0, hy + dy), Pos2::new(hx + 5.0, hy + dy)], Stroke::new(1.4_f32, Color32::from_rgb(0xb0, 0xc0, 0xd4)));
         }
-        painter.text(
-            ghost.left_center() + Vec2::new(24.0, 0.0),
-            Align2::LEFT_CENTER,
-            &drag.label,
-            egui::FontId::proportional(13.0),
-            Color32::WHITE,
-        );
+        painter.text(ghost.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, &drag.label, egui::FontId::proportional(13.0), Color32::WHITE);
         if drag.ids.len() > 1 {
             let badge = Rect::from_center_size(ghost.right_center() - Vec2::new(44.0, 0.0), Vec2::new(64.0, 20.0));
             painter.rect_filled(badge, CornerRadius::same(10), Color32::from_rgb(0xc4, 0x3c, 0x4a));
@@ -904,7 +847,11 @@ impl EncodeApp {
             .fixed_size(Vec2::new(420.0, 460.0))
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.preset_search).hint_text("Type to filter: \"better\", \"hevc\", \"6 Mbps\"…").desired_width(f32::INFINITY));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.preset_search)
+                        .hint_text("Type to filter: \"better\", \"hevc\", \"6 Mbps\"…")
+                        .desired_width(f32::INFINITY),
+                );
                 let q = self.preset_search.to_ascii_lowercase();
                 let (presets, recents, rules) = self.handle.lock(|s| (s.presets.all(), s.settings.recent_preset_ids.clone(), s.presets.screen_rules.clone()));
                 let auto_pick = {
@@ -963,7 +910,14 @@ impl EncodeApp {
                     });
                     ui.collapsing("User Presets & Groups", |ui| {
                         for p in presets.iter().filter(|p| p.kind == PresetKind::User) {
-                            if filter_preset(p, &q) && ui.selectable_label(p.id == job.preset.id, format!("{}  {}", p.name, if p.group.is_empty() { String::new() } else { format!("· {}", p.group) })).clicked() {
+                            if filter_preset(p, &q)
+                                && ui
+                                    .selectable_label(
+                                        p.id == job.preset.id,
+                                        format!("{}  {}", p.name, if p.group.is_empty() { String::new() } else { format!("· {}", p.group) }),
+                                    )
+                                    .clicked()
+                            {
                                 self.apply_preset_ids(&targets, &p.id);
                                 self.preset_popup_for = None;
                             }
@@ -1115,19 +1069,11 @@ impl EncodeApp {
         let selected = browsing == Some(p.id.as_str());
         let id = p.id.clone();
         let name = p.name.clone();
-        let extra = if PresetLibrary::is_studio_system(&p.id) {
-            p.bitrate_short()
-        } else {
-            p.format.short_label().to_string()
-        };
+        let extra = if PresetLibrary::is_studio_system(&p.id) { p.bitrate_short() } else { p.format.short_label().to_string() };
         let inner = ui.dnd_drag_source(Id::new(("pdrag", &id)), id.clone(), |ui| {
             ui.horizontal(|ui| {
                 preset_dot(ui, &id, &t);
-                let lab = if PresetLibrary::is_studio_system(&p.id) {
-                    format!("{name}")
-                } else {
-                    name.clone()
-                };
+                let lab = if PresetLibrary::is_studio_system(&p.id) { name.to_string() } else { name.clone() };
                 let r = ui.selectable_label(selected, lab);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(extra).small().color(t.text_dim));
@@ -1162,14 +1108,22 @@ impl EncodeApp {
             }
         });
         ui.label(RichText::new(format!("Format    {}", p.format.label())).small());
-        ui.label(RichText::new(format!("Size      {}", if p.video.width.is_none() { "Matches each screen".into() } else { format!("{}×{}", p.video.width.unwrap_or(0), p.video.height.unwrap_or(0)) })).small());
+        ui.label(
+            RichText::new(format!(
+                "Size      {}",
+                if p.video.width.is_none() { "Matches each screen".into() } else { format!("{}×{}", p.video.width.unwrap_or(0), p.video.height.unwrap_or(0)) }
+            ))
+            .small(),
+        );
         let fps = match p.video.frame_rate {
             FrameRate::Custom(f) => format!("{f} fps"),
             FrameRate::Source => "Match source".into(),
         };
         ui.label(RichText::new(format!("Frame rate  {fps}")).small());
         ui.label(RichText::new(format!("Bitrate     {}", p.bitrate_short())).small());
-        ui.label(RichText::new(format!("In queue    {} outputs use it", self.handle.lock(|s| s.queue.jobs.iter().filter(|j| j.preset.id == p.id).count()))).small());
+        ui.label(
+            RichText::new(format!("In queue    {} outputs use it", self.handle.lock(|s| s.queue.jobs.iter().filter(|j| j.preset.id == p.id).count()))).small(),
+        );
         ui.horizontal(|ui| {
             if ui.button("Edit…").clicked() {
                 self.edit_preset = Some(p.clone());
@@ -1509,7 +1463,11 @@ fn rest_ids(jobs: &[Job], moving: &[String]) -> Vec<String> {
 fn drop_dest_for_output(jobs: &[Job], hovered_id: &str, moving: &[String], top: bool) -> usize {
     let rest = rest_ids(jobs, moving);
     let idx = rest.iter().position(|id| id == hovered_id).unwrap_or(rest.len().saturating_sub(1));
-    if top { idx } else { idx.saturating_add(1) }
+    if top {
+        idx
+    } else {
+        idx.saturating_add(1)
+    }
 }
 
 fn drop_dest_for_source(jobs: &[Job], g: &SourceGroup, moving: &[String], top: bool) -> usize {
@@ -1539,11 +1497,7 @@ fn hit_geom(geoms: &[QueueGeom], pos: Pos2) -> Option<&QueueGeom> {
         geoms
             .iter()
             .filter(|g| pos.x >= g.rect.left() && pos.x <= g.rect.right())
-            .min_by(|a, b| {
-                (a.rect.center().y - pos.y)
-                    .abs()
-                    .total_cmp(&(b.rect.center().y - pos.y).abs())
-            })
+            .min_by(|a, b| (a.rect.center().y - pos.y).abs().total_cmp(&(b.rect.center().y - pos.y).abs()))
     })
 }
 
@@ -1556,16 +1510,16 @@ fn paint_grab_or_lock(ui: &mut Ui, locked: bool, t: &Tokens) {
         painter.rect_stroke(
             Rect::from_center_size(c + Vec2::new(0.0, 2.5), Vec2::new(8.0, 7.0)),
             CornerRadius::same(1),
-            Stroke::new(1.3, t.text_faint),
+            Stroke::new(1.3_f32, t.text_faint),
             StrokeKind::Inside,
         );
-        painter.circle_stroke(c + Vec2::new(0.0, -1.5), 2.8, Stroke::new(1.3, t.text_faint));
+        painter.circle_stroke(c + Vec2::new(0.0, -1.5), 2.8, Stroke::new(1.3_f32, t.text_faint));
     } else {
         let x0 = rect.center().x - 5.0;
         let x1 = rect.center().x + 5.0;
         let y = rect.center().y;
         for dy in [-4.0_f32, 0.0, 4.0] {
-            painter.line_segment([Pos2::new(x0, y + dy), Pos2::new(x1, y + dy)], Stroke::new(1.5, t.text_dim));
+            painter.line_segment([Pos2::new(x0, y + dy), Pos2::new(x1, y + dy)], Stroke::new(1.5_f32, t.text_dim));
         }
     }
 }
@@ -1588,8 +1542,8 @@ fn paint_forbidden(painter: &Painter, rect: Rect, msg: &str) {
     painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.8_f32, red), StrokeKind::Inside);
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x40, 0x10, 0x12, 90));
     let c = rect.left_center() + Vec2::new(18.0, 0.0);
-    painter.circle_stroke(c, 7.0, Stroke::new(1.6, red));
-    painter.line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], Stroke::new(1.6, red));
+    painter.circle_stroke(c, 7.0, Stroke::new(1.6_f32, red));
+    painter.line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], Stroke::new(1.6_f32, red));
     painter.text(rect.center() + Vec2::new(10.0, 0.0), Align2::CENTER_CENTER, msg, egui::FontId::proportional(12.0), Color32::from_rgb(0xf0, 0xc0, 0xc0));
 }
 
@@ -1645,11 +1599,7 @@ pub fn group_jobs(jobs: &[Job]) -> Vec<SourceGroup> {
             out.push(SourceGroup {
                 key,
                 title: j.source.group_title(),
-                subtitle: if j.source.is_effectcraft() {
-                    format!("{n_later} from EffectCraft")
-                } else {
-                    "dropped from Explorer · no screen name".into()
-                },
+                subtitle: if j.source.is_effectcraft() { format!("{n_later} from EffectCraft") } else { "dropped from Explorer · no screen name".into() },
                 job_ids: vec![j.id.clone()],
             });
         }

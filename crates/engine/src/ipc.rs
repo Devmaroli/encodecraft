@@ -39,7 +39,7 @@ impl IpcServer {
                     match listener.accept() {
                         Ok((s, _)) => {
                             if live.load(Ordering::SeqCst) >= MAX_CONNS {
-                                let _ = write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
+                                write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
                                 continue;
                             }
                             live.fetch_add(1, Ordering::SeqCst);
@@ -63,6 +63,9 @@ impl IpcServer {
 }
 
 fn handle_conn(stream: TcpStream, handle: Handle) {
+    // A nonblocking listener accepts nonblocking sockets on Windows. Later
+    // packets of a Content-Length body must block instead of looking truncated.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut peek = [0u8; 8];
@@ -101,8 +104,8 @@ fn handle_conn(stream: TcpStream, handle: Handle) {
                     }
                     Err(e) => ControlReply { id: 0, ok: false, result: None, error: Some(format!("bad json: {e}")) },
                 };
-                let mut s = reader.get_mut();
-                if write_line(&mut s, &reply).is_err() {
+                let s = reader.get_mut();
+                if write_line(s, &reply).is_err() {
                     break;
                 }
             }
@@ -163,10 +166,8 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
         let _ = write_http(&mut stream, 413, r#"{"ok":false,"error":"payload too large"}"#);
         return;
     }
-    if expect_continue {
-        if write_continue(reader.get_mut()).is_err() {
-            return;
-        }
+    if expect_continue && write_continue(reader.get_mut()).is_err() {
+        return;
     }
     let body = match read_exact_len(&mut reader, content_length) {
         Ok(b) => b,
@@ -289,6 +290,7 @@ fn write_continue(stream: &mut impl Write) -> std::io::Result<()> {
 fn read_exact_len<R: Read>(reader: &mut R, len: usize) -> std::io::Result<Vec<u8>> {
     let mut body = vec![0u8; len];
     let mut got = 0usize;
+    let started = std::time::Instant::now();
     while got < len {
         match reader.read(&mut body[got..]) {
             Ok(0) => {
@@ -296,6 +298,12 @@ fn read_exact_len<R: Read>(reader: &mut R, len: usize) -> std::io::Result<Vec<u8
             }
             Ok(n) => got += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() > IO_TIMEOUT {
+                    return Err(e);
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
             Err(e) => return Err(e),
         }
     }

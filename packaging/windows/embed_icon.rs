@@ -11,7 +11,10 @@ fn main() {
     if !windows || !ico.is_file() {
         return;
     }
-    let path = ico.to_str().expect("app icon path must be UTF-8");
+    let Some(path) = ico.to_str() else {
+        eprintln!("app icon path is not UTF-8: {}", ico.display());
+        std::process::exit(1);
+    };
     let ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
     let mut res = winresource::WindowsResource::new();
     res.set_icon(path);
@@ -20,5 +23,8 @@ fn main() {
     res.set("ProductVersion", &ver);
     res.set("FileVersion", &ver);
     res.set("LegalCopyright", "EncodeCraft contributors");
-    res.compile().unwrap_or_else(|e| panic!("could not embed Windows app icon {path}: {e}"));
+    if let Err(err) = res.compile() {
+        eprintln!("could not embed Windows app icon {path}: {err}");
+        std::process::exit(1);
+    }
 }

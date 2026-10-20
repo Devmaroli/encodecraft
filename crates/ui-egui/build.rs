@@ -12,18 +12,27 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.join(name).display());
     }
 
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let Ok(out_dir) = env::var("OUT_DIR") else {
+        eprintln!("OUT_DIR is not set");
+        std::process::exit(1);
+    };
+    let out = PathBuf::from(out_dir);
     let dest = out.join("app_icon.rs");
 
     let png = ["encodecraft-256.png", "encodecraft-64.png"].into_iter().map(|n| dir.join(n)).find(|p| p.is_file());
 
     let src = if let Some(png) = png {
-        let path = png.to_str().expect("icon path UTF-8").replace('\\', "/");
-        format!(
-            "pub fn png_bytes() -> Option<&'static [u8]> {{ Some(include_bytes!({path:?})) }}\n"
-        )
+        let Some(path) = png.to_str() else {
+            eprintln!("icon path is not UTF-8: {}", png.display());
+            std::process::exit(1);
+        };
+        let path = path.replace('\\', "/");
+        format!("pub fn png_bytes() -> Option<&'static [u8]> {{ Some(include_bytes!({path:?})) }}\n")
     } else {
         "pub fn png_bytes() -> Option<&'static [u8]> { None }\n".into()
     };
-    fs::write(dest, src).expect("write app_icon.rs");
+    if let Err(err) = fs::write(&dest, src) {
+        eprintln!("write {}: {err}", dest.display());
+        std::process::exit(1);
+    }
 }

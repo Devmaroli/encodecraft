@@ -14,6 +14,9 @@
 !ifndef PAYLOAD
   !error "PAYLOAD (staged files directory) must be defined"
 !endif
+!ifndef PAYLOAD_GLOB
+  !define PAYLOAD_GLOB "${PAYLOAD}/*"
+!endif
 !ifndef OUTFILE
   !define OUTFILE "EncodeCraft-Setup-x64.exe"
 !endif
@@ -74,7 +77,7 @@ Section "EncodeCraft" SecApp
   SetOutPath "$INSTDIR"
   ; Installed copy is not portable: settings stay in %APPDATA%.
   Delete "$INSTDIR\portable.txt"
-  File /r "${PAYLOAD}/*"
+  File /r "${PAYLOAD_GLOB}"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 

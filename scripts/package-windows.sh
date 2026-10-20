@@ -228,7 +228,15 @@ build_installer() {
   }
   local out="$ROOT/dist/$SETUP_NAME"
   rm -f "$out"
+  local glob
+  if is_windows; then
+    # Windows NSIS does not treat "dir/*" as a wildcard. It needs "dir\*.*".
+    glob="$(native_path "$STAGE")\\*.*"
+  else
+    glob="${STAGE}/*"
+  fi
   log "NSIS $nsis → $out"
+  log "payload $(find "$STAGE" -type f | wc -l | tr -d ' ') files, glob $glob"
   # Debian makensis wants -D; Windows makensis accepts /D.
   # On GitHub windows-latest, convert Git Bash paths so File /r finds the payload.
   "$nsis" \
@@ -236,6 +244,7 @@ build_installer() {
     -DPRODUCT_VERSION_NSIS="$NSIS_VER" \
     "-DOUTFILE=$(native_path "$out")" \
     "-DPAYLOAD=$(native_path "$STAGE")" \
+    "-DPAYLOAD_GLOB=${glob}" \
     "-DICO=$(native_path "$ROOT/assets/app-icon/encodecraft.ico")" \
     "$(native_path "$ROOT/packaging/windows/encodecraft.nsi")"
   if [[ ! -f "$out" ]]; then

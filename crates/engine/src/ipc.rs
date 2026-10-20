@@ -39,7 +39,7 @@ impl IpcServer {
                     match listener.accept() {
                         Ok((s, _)) => {
                             if live.load(Ordering::SeqCst) >= MAX_CONNS {
-                                let _ = write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
+                                write_http_raw(&s, 503, r#"{"ok":false,"error":"busy"}"#);
                                 continue;
                             }
                             live.fetch_add(1, Ordering::SeqCst);
@@ -101,8 +101,8 @@ fn handle_conn(stream: TcpStream, handle: Handle) {
                     }
                     Err(e) => ControlReply { id: 0, ok: false, result: None, error: Some(format!("bad json: {e}")) },
                 };
-                let mut s = reader.get_mut();
-                if write_line(&mut s, &reply).is_err() {
+                let s = reader.get_mut();
+                if write_line(s, &reply).is_err() {
                     break;
                 }
             }
@@ -163,10 +163,8 @@ fn handle_http(mut stream: TcpStream, handle: Handle) {
         let _ = write_http(&mut stream, 413, r#"{"ok":false,"error":"payload too large"}"#);
         return;
     }
-    if expect_continue {
-        if write_continue(reader.get_mut()).is_err() {
-            return;
-        }
+    if expect_continue && write_continue(reader.get_mut()).is_err() {
+        return;
     }
     let body = match read_exact_len(&mut reader, content_length) {
         Ok(b) => b,

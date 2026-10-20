@@ -72,7 +72,7 @@ pub fn should_begin_marquee(pos: Pos2, rows: &[(Rect, Rect)], scroll: Rect) -> b
     scroll.contains(pos)
 }
 
-pub fn split_encoding<'a>(jobs: &'a [encodecraft_queue::Job], ids: &[String]) -> (Vec<String>, Vec<String>) {
+pub fn split_encoding(jobs: &[encodecraft_queue::Job], ids: &[String]) -> (Vec<String>, Vec<String>) {
     let mut encoding = Vec::new();
     let mut rest = Vec::new();
     for id in ids {

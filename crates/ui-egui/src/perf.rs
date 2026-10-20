@@ -77,7 +77,17 @@ impl PerfHud {
         }
         egui::Area::new(egui::Id::new("perf-hud")).fixed_pos(egui::pos2(8.0, 8.0)).show(ctx, |ui| {
             egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(0, 0, 0, 180)).inner_margin(6.0).show(ui, |ui| {
-                ui.label(RichText::new(format!("frame {last:.1} ms  avg {avg:.1}  max {max:.1}  >16ms {over}", last = self.last_ms, avg = self.avg_ms(), max = self.max_ms, over = self.over_16)).color(Color32::from_rgb(0x9e, 0xdc, 0xff)).size(11.0));
+                ui.label(
+                    RichText::new(format!(
+                        "frame {last:.1} ms  avg {avg:.1}  max {max:.1}  >16ms {over}",
+                        last = self.last_ms,
+                        avg = self.avg_ms(),
+                        max = self.max_ms,
+                        over = self.over_16
+                    ))
+                    .color(Color32::from_rgb(0x9e, 0xdc, 0xff))
+                    .size(11.0),
+                );
                 for s in &self.slow_ops {
                     ui.label(RichText::new(s).color(Color32::from_rgb(0xf0, 0xc0, 0x80)).size(11.0));
                 }

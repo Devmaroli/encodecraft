@@ -751,7 +751,7 @@ pub fn ffmpeg_banner(s: &Session) -> String {
 }
 
 impl Settings {
-    pub fn default_preset<'a>(&self, lib: &'a PresetLibrary) -> Result<ExportPreset, EngineError> {
+    pub fn default_preset(&self, lib: &PresetLibrary) -> Result<ExportPreset, EngineError> {
         lib.get_or_parse(&self.default_preset_id).map_err(|e| EngineError::Message(e.to_string()))
     }
 }
@@ -1044,7 +1044,7 @@ mod tests {
         let h = Handle::open_core().unwrap();
         let media = home.join("clip.mp4");
         std::fs::write(&media, b"x").unwrap();
-        let ids = h.lock(|s| s.add_files(&[media.clone()], "system.h264-mp4")).unwrap();
+        let ids = h.lock(|s| s.add_files(std::slice::from_ref(&media), "system.h264-mp4")).unwrap();
         assert_eq!(ids.len(), 1);
         let out = home.join("Output");
         h.lock(|s| {

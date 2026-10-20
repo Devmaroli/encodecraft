@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{
-    Color32, CornerRadius, Id, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportBuilder, ViewportClass,
-    ViewportCommand, ViewportId, WidgetText, WindowLevel,
+    Color32, CornerRadius, Id, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId,
+    WidgetText, WindowLevel,
 };
 use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::{DockArea, DockState, Node, NodeIndex, OverlayType, Style, Surface, SurfaceIndex, TabStyle, TabViewer, Tree};
@@ -516,11 +516,8 @@ impl EncodeApp {
             format!("{} — EncodeCraft", tabs.iter().map(|t| t.short()).collect::<Vec<_>>().join(" · "))
         };
         let id = ViewportId::from_hash_of(("encodecraft-float", f.id));
-        let mut builder = ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size(f.size)
-            .with_min_inner_size(Vec2::new(280.0, 180.0))
-            .with_decorations(true);
+        let mut builder =
+            ViewportBuilder::default().with_title(title).with_inner_size(f.size).with_min_inner_size(Vec2::new(280.0, 180.0)).with_decorations(true);
         if f.needs_place {
             builder = builder.with_position(f.pos);
             f.needs_place = false;
@@ -611,11 +608,8 @@ impl EncodeApp {
                     continue;
                 }
                 let rect = state.rect();
-                let (pos, size) = if rect.is_positive() && rect.size().x > 40.0 {
-                    (rect.min, rect.size())
-                } else {
-                    (Pos2::new(80.0, 80.0), Vec2::new(440.0, 620.0))
-                };
+                let (pos, size) =
+                    if rect.is_positive() && rect.size().x > 40.0 { (rect.min, rect.size()) } else { (Pos2::new(80.0, 80.0), Vec2::new(440.0, 620.0)) };
                 self.push_float(tabs, pos, size, false, None);
             }
         }
@@ -624,16 +618,7 @@ impl EncodeApp {
     fn push_float(&mut self, tabs: Vec<PanelKind>, pos: Pos2, size: Vec2, always_on_top: bool, monitor_size: Option<Vec2>) {
         let id = self.layout.next_float;
         self.layout.next_float += 1;
-        self.layout.floats.push(FloatWin {
-            id,
-            dock: DockState::new(tabs),
-            pos,
-            size,
-            always_on_top,
-            monitor_size,
-            needs_place: true,
-            frames: 0,
-        });
+        self.layout.floats.push(FloatWin { id, dock: DockState::new(tabs), pos, size, always_on_top, monitor_size, needs_place: true, frames: 0 });
         self.layout.mark_dirty();
     }
 
@@ -814,12 +799,7 @@ impl EncodeApp {
     }
 
     fn snapshot_user(&self, id: String, name: String) -> UserWorkspace {
-        UserWorkspace {
-            id,
-            name,
-            dock: self.layout.dock.clone(),
-            floats: self.layout.floats.iter().map(FloatWin::to_saved).collect(),
-        }
+        UserWorkspace { id, name, dock: self.layout.dock.clone(), floats: self.layout.floats.iter().map(FloatWin::to_saved).collect() }
     }
 
     fn save_current_as(&mut self, name: String) -> bool {
@@ -990,12 +970,9 @@ impl EncodeApp {
         let mut open = true;
         let mut save = false;
         let mut cancel = false;
-        egui::Window::new("Save current layout as…")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
+        egui::Window::new("Save current layout as…").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(
+            ctx,
+            |ui| {
                 ui.label("Names your current arrangement.");
                 ui.add(egui::TextEdit::singleline(&mut self.save_as_name).desired_width(280.0).hint_text("Night shift"));
                 if is_reserved_workspace_name(&self.save_as_name) {
@@ -1010,7 +987,8 @@ impl EncodeApp {
                         cancel = true;
                     }
                 });
-            });
+            },
+        );
         if save {
             let name = std::mem::take(&mut self.save_as_name);
             if self.save_current_as(name) {
@@ -1028,90 +1006,85 @@ impl EncodeApp {
         }
         let mut open = true;
         let t = self.t();
-        egui::Window::new("Manage workspaces…")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(Vec2::new(720.0, 420.0))
-            .show(ctx, |ui| {
-                ui.label(RichText::new("A small picture of each layout. Built-ins cannot be deleted.").color(t.text_dim));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    for id in [BUILTIN_FULL, BUILTIN_QUEUE, BUILTIN_PRESETS] {
-                        workspace_card(ui, &t, builtin_label(id), Some(id), builtin_dock(id).as_ref(), &[], self.layout.active == id, false);
-                    }
-                });
-                if !self.layout.user.is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("YOURS").small().color(t.text_faint).strong());
-                    ui.horizontal_wrapped(|ui| {
-                        let mut rename = None;
-                        let mut delete = None;
-                        let mut up = None;
-                        let mut down = None;
-                        for (idx, ws) in self.layout.user.iter().enumerate() {
-                            ui.vertical(|ui| {
-                                workspace_card(ui, &t, &ws.name, None, Some(&ws.dock), &ws.floats, self.layout.active == ws.id, true);
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("Rename").clicked() {
-                                        rename = Some(idx);
-                                    }
-                                    if ui.add_enabled(idx > 0, egui::Button::new("↑")).clicked() {
-                                        up = Some(idx);
-                                    }
-                                    if ui.add_enabled(idx + 1 < self.layout.user.len(), egui::Button::new("↓")).clicked() {
-                                        down = Some(idx);
-                                    }
-                                    if ui.small_button("Delete").clicked() {
-                                        delete = Some(idx);
-                                    }
-                                });
-                            });
-                        }
-                        if let Some(idx) = rename {
-                            self.rename_idx = Some(idx);
-                            self.rename_buf = self.layout.user.get(idx).map(|w| w.name.clone()).unwrap_or_default();
-                        }
-                        if let Some(idx) = delete {
-                            let gone = self.layout.user.remove(idx);
-                            if self.layout.active == gone.id {
-                                self.apply_builtin(BUILTIN_FULL);
-                            }
-                            self.layout.mark_dirty();
-                        }
-                        if let Some(idx) = up {
-                            self.layout.user.swap(idx, idx - 1);
-                            self.layout.mark_dirty();
-                        }
-                        if let Some(idx) = down {
-                            self.layout.user.swap(idx, idx + 1);
-                            self.layout.mark_dirty();
-                        }
-                    });
-                }
-                if let Some(idx) = self.rename_idx {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Rename");
-                        ui.add(egui::TextEdit::singleline(&mut self.rename_buf).desired_width(200.0));
-                        if ui.button("Apply").clicked() {
-                            let n = self.rename_buf.trim();
-                            if n.is_empty() {
-                                self.rename_idx = None;
-                            } else if is_reserved_workspace_name(n) {
-                                self.status = format!("“{n}” is a built-in workspace. Choose another name.");
-                            } else if let Some(ws) = self.layout.user.get_mut(idx) {
-                                ws.name = n.to_string();
-                                self.rename_idx = None;
-                                self.layout.mark_dirty();
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.rename_idx = None;
-                        }
-                    });
+        egui::Window::new("Manage workspaces…").open(&mut open).collapsible(false).resizable(true).default_size(Vec2::new(720.0, 420.0)).show(ctx, |ui| {
+            ui.label(RichText::new("A small picture of each layout. Built-ins cannot be deleted.").color(t.text_dim));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for id in [BUILTIN_FULL, BUILTIN_QUEUE, BUILTIN_PRESETS] {
+                    workspace_card(ui, &t, builtin_label(id), Some(id), builtin_dock(id).as_ref(), &[], self.layout.active == id, false);
                 }
             });
+            if !self.layout.user.is_empty() {
+                ui.add_space(10.0);
+                ui.label(RichText::new("YOURS").small().color(t.text_faint).strong());
+                ui.horizontal_wrapped(|ui| {
+                    let mut rename = None;
+                    let mut delete = None;
+                    let mut up = None;
+                    let mut down = None;
+                    for (idx, ws) in self.layout.user.iter().enumerate() {
+                        ui.vertical(|ui| {
+                            workspace_card(ui, &t, &ws.name, None, Some(&ws.dock), &ws.floats, self.layout.active == ws.id, true);
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Rename").clicked() {
+                                    rename = Some(idx);
+                                }
+                                if ui.add_enabled(idx > 0, egui::Button::new("↑")).clicked() {
+                                    up = Some(idx);
+                                }
+                                if ui.add_enabled(idx + 1 < self.layout.user.len(), egui::Button::new("↓")).clicked() {
+                                    down = Some(idx);
+                                }
+                                if ui.small_button("Delete").clicked() {
+                                    delete = Some(idx);
+                                }
+                            });
+                        });
+                    }
+                    if let Some(idx) = rename {
+                        self.rename_idx = Some(idx);
+                        self.rename_buf = self.layout.user.get(idx).map(|w| w.name.clone()).unwrap_or_default();
+                    }
+                    if let Some(idx) = delete {
+                        let gone = self.layout.user.remove(idx);
+                        if self.layout.active == gone.id {
+                            self.apply_builtin(BUILTIN_FULL);
+                        }
+                        self.layout.mark_dirty();
+                    }
+                    if let Some(idx) = up {
+                        self.layout.user.swap(idx, idx - 1);
+                        self.layout.mark_dirty();
+                    }
+                    if let Some(idx) = down {
+                        self.layout.user.swap(idx, idx + 1);
+                        self.layout.mark_dirty();
+                    }
+                });
+            }
+            if let Some(idx) = self.rename_idx {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Rename");
+                    ui.add(egui::TextEdit::singleline(&mut self.rename_buf).desired_width(200.0));
+                    if ui.button("Apply").clicked() {
+                        let n = self.rename_buf.trim();
+                        if n.is_empty() {
+                            self.rename_idx = None;
+                        } else if is_reserved_workspace_name(n) {
+                            self.status = format!("“{n}” is a built-in workspace. Choose another name.");
+                        } else if let Some(ws) = self.layout.user.get_mut(idx) {
+                            ws.name = n.to_string();
+                            self.rename_idx = None;
+                            self.layout.mark_dirty();
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.rename_idx = None;
+                    }
+                });
+            }
+        });
         if !open {
             self.show_manage = false;
             self.rename_idx = None;
@@ -1119,7 +1092,16 @@ impl EncodeApp {
     }
 }
 
-fn workspace_card(ui: &mut Ui, t: &Tokens, name: &str, builtin: Option<&str>, dock: Option<&DockState<PanelKind>>, floats: &[SavedFloat], current: bool, yours: bool) {
+fn workspace_card(
+    ui: &mut Ui,
+    t: &Tokens,
+    name: &str,
+    builtin: Option<&str>,
+    dock: Option<&DockState<PanelKind>>,
+    floats: &[SavedFloat],
+    current: bool,
+    yours: bool,
+) {
     let size = Vec2::new(150.0, 92.0);
     ui.vertical(|ui| {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -1366,12 +1348,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("layout.json");
         let mut s = LayoutSession::new();
-        s.user.push(UserWorkspace {
-            id: "user-1".into(),
-            name: "Full".into(),
-            dock: layout_queue_only(),
-            floats: Vec::new(),
-        });
+        s.user.push(UserWorkspace { id: "user-1".into(), name: "Full".into(), dock: layout_queue_only(), floats: Vec::new() });
         s.save_to(&path);
         let loaded = LayoutSession::load_from(&path);
         assert_eq!(loaded.user.len(), 1);

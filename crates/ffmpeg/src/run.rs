@@ -396,7 +396,7 @@ impl ChildGuard {
                 self.child = None;
                 Ok(st)
             }
-            None => Err(std::io::Error::new(std::io::ErrorKind::Other, "no child")),
+            None => Err(std::io::Error::other("no child")),
         }
     }
 }
@@ -765,7 +765,7 @@ pub fn encode_raw_from_file(
 }
 
 /// First 2-pass plan with stdin rawvideo, or the only plan for 1-pass.
-pub fn first_stdin_plan<'a>(plans: &'a [super::command::EncodePlan]) -> Option<(usize, &'a super::command::EncodePlan)> {
+pub fn first_stdin_plan(plans: &[super::command::EncodePlan]) -> Option<(usize, &super::command::EncodePlan)> {
     plans.iter().enumerate().find(|(_, p)| p.stdin)
 }
 

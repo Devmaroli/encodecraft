@@ -12,10 +12,7 @@ pub fn seed_preset_ui_demo(session: &mut Session) -> Result<(), EngineError> {
     session.queue.jobs.clear();
     session.queue.running = false;
     session.settings.output_dir = PathBuf::from(r"D:\Jobs\Ramadan\out");
-    session.settings.recent_preset_ids = vec![
-        "system.h264-mp4".into(),
-        "user.ramadan-low-4".into(),
-    ];
+    session.settings.recent_preset_ids = vec!["system.h264-mp4".into(), "user.ramadan-low-4".into()];
 
     let mut low = session.presets.get("system.h264-mp4").map_err(|e| EngineError::Message(e.to_string()))?;
     low.id = "user.ramadan-low-4".into();
@@ -65,14 +62,7 @@ pub fn seed_preset_ui_demo(session: &mut Session) -> Result<(), EngineError> {
             scale: None,
             start_queue: false,
         };
-        let ids = session.queue.enqueue(
-            &req,
-            &session.presets,
-            &session.settings.output_dir,
-            "{name}_{width}x{height}",
-            true,
-            false,
-        )?;
+        let ids = session.queue.enqueue(&req, &session.presets, &session.settings.output_dir, "{name}_{width}x{height}", true, false)?;
         if first_id.is_none() {
             first_id = ids.first().cloned();
         }
@@ -130,9 +120,7 @@ pub fn seed_stress_queue(session: &mut Session, n: usize) -> Result<(), EngineEr
     let mut g = 0u32;
     while left > 0 {
         let take = left.min(chunk);
-        let sizes: Vec<ScreenSize> = (0..take)
-            .map(|i| ScreenSize::new(format!("Screen {g}-{}", i + 1), 1920, 1080))
-            .collect();
+        let sizes: Vec<ScreenSize> = (0..take).map(|i| ScreenSize::new(format!("Screen {g}-{}", i + 1), 1920, 1080)).collect();
         let req = EnqueueRequest {
             schema: 1,
             source: JobSource::EffectCraft {
@@ -178,12 +166,7 @@ mod tests {
         let mut session = Session::load().expect("session");
         seed_preset_ui_demo(&mut session).expect("seed");
         assert!(session.queue.jobs.len() >= 8);
-        let eye = session
-            .queue
-            .jobs
-            .iter()
-            .find(|j| j.screen.as_ref().is_some_and(|s| s.name.to_ascii_lowercase().contains("kuwait")))
-            .expect("eye");
+        let eye = session.queue.jobs.iter().find(|j| j.screen.as_ref().is_some_and(|s| s.name.to_ascii_lowercase().contains("kuwait"))).expect("eye");
         assert_eq!(eye.preset.id, BETTER_RES_ID);
         let file = session.queue.jobs.iter().find(|j| matches!(j.source, JobSource::File { .. })).expect("file");
         assert_eq!(file.preset_reason, Some(PresetReason::Default));

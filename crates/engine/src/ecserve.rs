@@ -64,10 +64,7 @@ impl WarmServe {
             Ok(g) => g,
             Err(_) => return false,
         };
-        match g.try_wait() {
-            Ok(None) => true,
-            _ => false,
-        }
+        matches!(g.try_wait(), Ok(None))
     }
 
     pub fn rpc(&self, method: &str, params: Value) -> Result<Value, EngineError> {

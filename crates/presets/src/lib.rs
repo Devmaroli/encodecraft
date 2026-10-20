@@ -162,17 +162,12 @@ impl OutputFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrameRate {
+    #[default]
     Source,
     Custom(f64),
-}
-
-impl Default for FrameRate {
-    fn default() -> Self {
-        FrameRate::Source
-    }
 }
 
 impl FrameRate {
@@ -720,7 +715,7 @@ impl PresetLibrary {
             return Some(s.clone());
         }
         if let Some((w, h)) = ScreenSize::parse_dims(name_or_dims) {
-            return self.screens.iter().cloned().find(|s| s.width == w && s.height == h).or_else(|| Some(ScreenSize::new(format!("{w}x{h}"), w, h)));
+            return self.screens.iter().find(|s| s.width == w && s.height == h).cloned().or_else(|| Some(ScreenSize::new(format!("{w}x{h}"), w, h)));
         }
         None
     }
@@ -835,10 +830,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             p.audio.bitrate_kbps = 192;
             p
         },
-        {
-            let p = preset("system.wav", "WAV Audio", OutputFormat::Wav, Quality::bitrate(0), true);
-            p
-        },
+        preset("system.wav", "WAV Audio", OutputFormat::Wav, Quality::bitrate(0), true),
         {
             let mut p = preset("system.mp3", "MP3 Audio", OutputFormat::Mp3, Quality::bitrate(192), true);
             p.audio.bitrate_kbps = 192;
@@ -915,7 +907,7 @@ pub fn builtin_screens() -> Vec<ScreenSize> {
 
 pub fn parse_size_list(s: &str) -> Result<Vec<ScreenSize>, PresetError> {
     let mut out = Vec::new();
-    for part in s.split(|c| c == ',' || c == ';') {
+    for part in s.split([',', ';']) {
         let part = part.trim();
         if part.is_empty() {
             continue;

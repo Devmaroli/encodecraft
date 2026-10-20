@@ -279,7 +279,7 @@ fn out_path(dir: &Path, src: &str, preset: &encodecraft_presets::ExportPreset, w
     encodecraft_presets::output_path(dir, &naming, &ctx, preset.format.is_sequence())
 }
 
-fn pos<'a>(args: &'a [String], i: usize) -> Option<&'a str> {
+fn pos(args: &[String], i: usize) -> Option<&str> {
     args.iter().filter(|a| !a.starts_with('-')).nth(i).map(String::as_str)
 }
 

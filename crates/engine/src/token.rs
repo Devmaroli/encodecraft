@@ -34,7 +34,7 @@ pub fn current() -> Option<String> {
 
 fn generate() -> Result<String, io::Error> {
     let mut buf = [0u8; 32];
-    getrandom::getrandom(&mut buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    getrandom::getrandom(&mut buf).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(hex(&buf))
 }
 

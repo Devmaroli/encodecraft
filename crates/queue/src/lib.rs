@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_ffmpeg::EncodeProgress;
 use encodecraft_job::{EnqueueRequest, JobError, JobSource, ScaleMode, ScreenSize, Trim};
-use encodecraft_ffmpeg::h264_unencodable_message;
 use encodecraft_presets::{
     apply_template, constrain_output_dir, default_template, effective_naming, infer_screen_from_text, naming_uses_size, output_path, unique_output_path,
     ExportPreset, NamingContext, PresetLibrary, PresetReason, ScreenPresetRules, INSTALLATION_ID,
@@ -213,15 +213,7 @@ impl Job {
             return false;
         }
         let naming = if self.naming.is_empty() { default_template() } else { self.naming.as_str() };
-        let ctx = NamingContext::from_source(
-            &self.source,
-            &self.preset,
-            w,
-            h,
-            &self.id,
-            1,
-            self.screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""),
-        );
+        let ctx = NamingContext::from_source(&self.source, &self.preset, w, h, &self.id, 1, self.screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""));
         let base = output_path(&dir, naming, &ctx, self.preset.format.is_sequence());
         let next = unique_output_path(base, allow_overwrite);
         if next == self.output {
@@ -341,7 +333,7 @@ impl EncodeQueue {
     pub fn insert_jobs(&mut self, jobs: Vec<Job>, order: Option<&[String]>) {
         self.jobs.extend(jobs);
         if let Some(order) = order {
-            let _ = self.restore_order(order);
+            self.restore_order(order);
         }
     }
 
@@ -553,9 +545,10 @@ impl EncodeQueue {
                 preset_reason = Some(PresetReason::Manual);
                 preset_overridden = true;
             } else if auto {
-                let pixels = req.source.pixel_size().or_else(|| {
-                    screen.as_ref().and_then(|s| if s.width > 0 && s.height > 0 { Some((s.width, s.height)) } else { None })
-                });
+                let pixels = req
+                    .source
+                    .pixel_size()
+                    .or_else(|| screen.as_ref().and_then(|s| if s.width > 0 && s.height > 0 { Some((s.width, s.height)) } else { None }));
                 if let Some(pick) = lib.screen_rules.pick(screen.as_ref(), &source_hint, pixels) {
                     if let Ok(chosen) = lib.get_or_parse(&pick.preset_id) {
                         pr = chosen;
@@ -596,15 +589,8 @@ impl EncodeQueue {
             let h = pr.video.height.unwrap_or(0);
             let encode_warning = h264_unencodable_message(&pr, w, h);
             let id = new_id("job");
-            let ctx = NamingContext::from_source(
-                &req.source,
-                &pr,
-                w,
-                h,
-                &id,
-                (n as u32).saturating_add(1),
-                screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""),
-            );
+            let ctx =
+                NamingContext::from_source(&req.source, &pr, w, h, &id, (n as u32).saturating_add(1), screen.as_ref().map(|s| s.name.as_str()).unwrap_or(""));
             let base = output_path(&out_dir, naming, &ctx, pr.format.is_sequence());
             let mut output = unique_output_path(base.clone(), allow_overwrite);
             if !allow_overwrite {
@@ -854,7 +840,7 @@ mod tests {
         q.jobs[1].status = JobStatus::Encoding;
         let before = q.job_ids();
         let last = q.jobs[3].id.clone();
-        let pos = q.reorder(&[last.clone()], 0).unwrap();
+        let pos = q.reorder(std::slice::from_ref(&last), 0).unwrap();
         assert_eq!(pos, 3);
         assert_eq!(q.jobs[0].status, JobStatus::Done);
         assert_eq!(q.jobs[1].status, JobStatus::Encoding);
@@ -1132,10 +1118,7 @@ mod tests {
         assert!(!name.contains("Test"), "{name}");
         assert!(!name.contains("6880x1032"), "{name}");
         assert_eq!(jobs[0].status, JobStatus::Waiting);
-        assert_eq!(
-            jobs[0].screen.as_ref().map(|s| s.name.as_str()),
-            Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp")
-        );
+        assert_eq!(jobs[0].screen.as_ref().map(|s| s.name.as_str()), Some("Zain_Al Shaheed_Video 1_Karting High Wall- 6880X1032_10 Sec EN.mp4 Comp"));
     }
 
     #[test]

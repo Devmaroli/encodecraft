@@ -87,7 +87,7 @@ struct EcprojPicker {
 impl EncodeApp {
     pub fn new(handle: Handle) -> Self {
         if std::env::var("ENCODECRAFT_DEMO").ok().as_deref() == Some("1") {
-            let _ = handle.lock(|s| seed_preset_ui_demo(s));
+            let _ = handle.lock(seed_preset_ui_demo);
         }
         if let Ok(raw) = std::env::var("ENCODECRAFT_BENCH") {
             let n = std::env::var("ENCODECRAFT_BENCH_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
@@ -1095,9 +1095,7 @@ impl EncodeApp {
                 });
             } else {
                 if ui.button("Select all").clicked() {
-                    for f in &mut picker.selected {
-                        *f = true;
-                    }
+                    picker.selected.fill(true);
                 }
                 ui.add_space(4.0);
                 for (i, name) in picker.comps.iter().enumerate() {

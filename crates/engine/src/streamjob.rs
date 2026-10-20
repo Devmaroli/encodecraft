@@ -213,7 +213,7 @@ pub fn try_stream(
     };
     let cli = h
         .lock(|s| s.settings.effectcraft_cli.clone())
-        .and_then(|p| if p.is_file() { Some(p) } else { None })
+        .filter(|p| p.is_file())
         .or_else(|| encodecraft_ffmpeg::find_effectcraft_cli().ok())
         .ok_or(encodecraft_ffmpeg::FfmpegError::EffectCraftMissing)?;
     let caps = probe_cli_caps(&cli);

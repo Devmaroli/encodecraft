@@ -422,7 +422,9 @@ fn humanize_json_error(e: &serde_json::Error) -> String {
     if core.contains("job schema") {
         return format!("{core} ({loc})");
     }
-    format!("Could not parse enqueue JSON ({loc}): {core}. EncodeCraft understands schema 1 or \"{SCHEMA_ID}\"; extra fields such as source_version are ignored.")
+    format!(
+        "Could not parse enqueue JSON ({loc}): {core}. EncodeCraft understands schema 1 or \"{SCHEMA_ID}\"; extra fields such as source_version are ignored."
+    )
 }
 
 impl EnqueueRequest {
@@ -901,19 +903,10 @@ mod tests {
             strip_verbatim_path(r"\\?\C:\Users\ASUS\Documents\Craft\Output\InstallTest _ Eye of Kuwait_1920x1080.mp4"),
             r"C:\Users\ASUS\Documents\Craft\Output\InstallTest _ Eye of Kuwait_1920x1080.mp4"
         );
-        assert_eq!(
-            strip_verbatim_path(r"\\?\UNC\fileserver\share\Output\out.mp4"),
-            r"\\fileserver\share\Output\out.mp4"
-        );
+        assert_eq!(strip_verbatim_path(r"\\?\UNC\fileserver\share\Output\out.mp4"), r"\\fileserver\share\Output\out.mp4");
         assert_eq!(strip_verbatim_path(r"C:\Users\ASUS\out.mp4"), r"C:\Users\ASUS\out.mp4");
         assert_eq!(strip_verbatim_path("/home/ada/out.mp4"), "/home/ada/out.mp4");
-        assert_eq!(
-            display_path(Path::new(r"\\?\C:\Users\ASUS\Documents\spot.ecproj")),
-            r"C:\Users\ASUS\Documents\spot.ecproj"
-        );
-        assert_eq!(
-            display_path_buf(Path::new(r"\\?\UNC\office\jobs\spot.ecproj")),
-            PathBuf::from(r"\\office\jobs\spot.ecproj")
-        );
+        assert_eq!(display_path(Path::new(r"\\?\C:\Users\ASUS\Documents\spot.ecproj")), r"C:\Users\ASUS\Documents\spot.ecproj");
+        assert_eq!(display_path_buf(Path::new(r"\\?\UNC\office\jobs\spot.ecproj")), PathBuf::from(r"\\office\jobs\spot.ecproj"));
     }
 }
